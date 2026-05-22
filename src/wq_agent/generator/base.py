@@ -1,0 +1,18 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from ..models import WQDataField, WQOperator
+
+
+class BaseAlphaGenerator(ABC):
+    @abstractmethod
+    async def generate(
+        self,
+        data_fields: list[WQDataField],
+        operators: list[WQOperator],
+        previous_results: list[dict[str, Any]] | None = None,
+        count: int = 18,
+    ) -> list[str]:
+        ...

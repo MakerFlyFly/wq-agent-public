@@ -1,0 +1,64 @@
+templates:
+  - pattern: "rank(ts_delta({field}, {period}))"
+    periods: [5, 10, 20]
+    description: "Momentum signal - rank of price change"
+
+  - pattern: "ts_zscore({field}, {period})"
+    periods: [20, 60, 120]
+    description: "Mean reversion - z-score deviation from mean"
+
+  - pattern: "rank({field}) - rank(ts_delay({field}, {period}))"
+    periods: [5, 10, 20]
+    description: "Change in cross-sectional rank"
+
+  - pattern: "ts_rank({field}, {period})"
+    periods: [10, 20, 60]
+    description: "Time-series percentile rank"
+
+  - pattern: "divide(ts_mean({field}, {period}), ts_std_dev({field}, {period}))"
+    periods: [20, 60]
+    description: "Signal-to-noise ratio (Sharpe-like)"
+
+  - pattern: "ts_decay_linear({field}, {period})"
+    periods: [10, 20, 60]
+    description: "Linearly weighted moving average"
+
+  - pattern: "rank(ts_corr({field}, ts_delay({field}, 1), {period}))"
+    periods: [20, 60]
+    description: "Autocorrelation signal"
+
+  - pattern: "zscore(ts_mean({field}, {period}))"
+    periods: [20, 60]
+    description: "Normalized mean level"
+
+  - pattern: "group_neutralize(rank({field}), sector)"
+    periods: []
+    description: "Sector-neutral ranking"
+
+  - pattern: "ts_regression({field}, ts_delay({field}, 1), {period}, 0, 1)"
+    periods: [20, 60]
+    description: "Regression residual (unexpected component)"
+
+  - pattern: "rank(ts_av_diff({field}, {period}))"
+    periods: [10, 20, 60]
+    description: "Deviation from moving average"
+
+  - pattern: "scale(rank(ts_delta({field}, {period})))"
+    periods: [5, 10, 20]
+    description: "Scaled momentum signal"
+
+  - pattern: "rank(ts_sum(sign(ts_delta({field}, 1)), {period}))"
+    periods: [10, 20, 60]
+    description: "Sum of directional changes"
+
+  - pattern: "rank(ts_min({field}, {period})) - rank(ts_max({field}, {period}))"
+    periods: [20, 60]
+    description: "Range position indicator"
+
+  - pattern: "winsorize(ts_zscore({field}, {period}))"
+    periods: [20, 60]
+    description: "Winsorized z-score for outlier control"
+
+  - pattern: "rank(divide(ts_delta({field}, {period}), ts_std_dev({field}, {period})))"
+    periods: [10, 20]
+    description: "Risk-adjusted momentum"

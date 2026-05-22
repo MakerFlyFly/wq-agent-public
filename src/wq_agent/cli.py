@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+from loguru import logger
+
+from .config import get_settings
+from .models import GenerationStrategy, AlphaStatus
+from .agent.orchestrator import Orchestrator
+
+app = typer.Typer(
+    name="wq-agent",
+    help="WorldQuant Alpha Generation & Backtesting Agent Harness",
+    add_completion=False,
+)
+console = Console()
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    level = "DEBUG" if verbose else "INFO"
+    logger.remove()
+    logger.add(sys.stderr, level=level, format="<level>{time:HH:mm:ss}</level> | <level>{message}</level>")
+    logger.add("wq_agent.log", level="DEBUG", rotation="10 MB")
+
+
+@app.command()
+def generate(
+    strategy: str = typer.Option("llm", "--strategy", "-s", help="Generation strategy: llm, template, factor_mining"),
+    count: int = typer.Option(18, "--count", "-n", help="Number of alphas to generate"),
+    no_backtest: bool = typer.Option(False, "--no-backtest", help="Skip auto-backtest"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Generate new alpha expressions."""
+    _setup_logging(verbose)
+
+    async def _run():
+        orch = Orchestrator()
+        try:
+            await orch.initialize()
+            records = await orch.run(
+                strategy=GenerationStrategy(strategy),
+                count=count,
+                auto_backtest=not no_backtest,
+            )
+            console.print(f"\n[bold green]Generated {len(records)} alphas[/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Error: {e}[/bold red]")
+            raise typer.Exit(1)
+        finally:
+            await orch.close()
+
+    asyncio.run(_run())
+
+
+@app.command()
+def backtest(
+    ids: Optional[str] = typer.Option(None, "--ids", "-i", help="Comma-separated alpha IDs"),
+    pending: bool = typer.Option(False, "--pending", help="Backtest all pending alphas"),
+    all_generated: bool = typer.Option(False, "--all", help="Backtest all generated alphas"),
+    max_concurrent: int = typer.Option(5, "--concurrent", "-c", help="Max concurrent simulations"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Run backtests on generated alphas."""
+    _setup_logging(verbose)
+
+    async def _run():
+        settings = get_settings()
+        settings.WQ_MAX_CONCURRENT = max_concurrent
+        orch = Orchestrator(settings)
+        try:
+            await orch.initialize()
+
+            alpha_ids: list[int] = []
+            if ids:
+                alpha_ids = [int(x.strip()) for x in ids.split(",")]
+            elif pending:
+                all_alphas = await orch.db.list_alphas(status=AlphaStatus.GENERATED, limit=1000)
+                alpha_ids = [a.id for a in all_alphas if a.id]
+            elif all_generated:
+                generated = await orch.db.list_alphas(status=AlphaStatus.GENERATED, limit=1000)
+                failed = await orch.db.list_alphas(status=AlphaStatus.FAILED, limit=1000)
+                alpha_ids = [a.id for a in generated + failed if a.id]
+            else:
+                console.print("[yellow]Specify --ids, --pending, or --all[/yellow]")
+                raise typer.Exit(1)
+
+            if not alpha_ids:
+                console.print("[yellow]No alphas to backtest[/yellow]")
+                return
+
+            console.print(f"[bold cyan]Backtesting {len(alpha_ids)} alphas...[/bold cyan]")
+            results = await orch.backtest(alpha_ids)
+            console.print(f"[bold green]Backtest complete: {len(results)} results[/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Error: {e}[/bold red]")
+            raise typer.Exit(1)
+        finally:
+            await orch.close()
+
+    asyncio.run(_run())
+
+
+@app.command(name="list")
+def list_alphas(
+    quality: Optional[str] = typer.Option(None, "--quality", "-q", help="Filter by quality: high, medium"),
+    min_fitness: Optional[float] = typer.Option(None, "--min-fitness", help="Minimum fitness threshold"),
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """List alphas and their results."""
+    _setup_logging(verbose)
+
+    async def _run():
+        orch = Orchestrator()
+        try:
+            await orch.initialize()
+
+            if quality or min_fitness:
+                threshold = min_fitness or 0.5
+                items = await orch.list_high_quality(threshold)
+                if items:
+                    table = Table(title=f"Alphas (fitness >= {threshold})")
+                    table.add_column("ID", style="cyan", justify="right")
+                    table.add_column("Expression", max_width=50)
+                    table.add_column("Fitness", style="green", justify="right")
+                    table.add_column("Sharpe", justify="right")
+                    table.add_column("Turnover", justify="right")
+                    table.add_column("Returns", justify="right")
+                    table.add_column("Grade", justify="center")
+                    for item in items:
+                        table.add_row(
+                            str(item["id"]),
+                            item["expression"][:50],
+                            f"{item['fitness']:.4f}" if item.get("fitness") else "N/A",
+                            f"{item['sharpe']:.4f}" if item.get("sharpe") else "N/A",
+                            f"{item['turnover']:.4f}" if item.get("turnover") else "N/A",
+                            f"{item['returns']:.4f}" if item.get("returns") else "N/A",
+                            str(item.get("grade", "")),
+                        )
+                    console.print(table)
+                else:
+                    console.print("[yellow]No alphas matching criteria[/yellow]")
+            else:
+                alpha_status = AlphaStatus(status) if status else None
+                alphas = await orch.db.list_alphas(status=alpha_status, limit=limit)
+                if alphas:
+                    table = Table(title="Alphas")
+                    table.add_column("ID", style="cyan", justify="right")
+                    table.add_column("Expression", max_width=50)
+                    table.add_column("Strategy", justify="center")
+                    table.add_column("Status", justify="center")
+                    table.add_column("Created", justify="right")
+                    for a in alphas:
+                        table.add_row(
+                            str(a.id),
+                            a.expression[:50],
+                            a.strategy.value,
+                            a.status.value,
+                            a.created_at.strftime("%m-%d %H:%M"),
+                        )
+                    console.print(table)
+                else:
+                    console.print("[yellow]No alphas found[/yellow]")
+        finally:
+            await orch.close()
+
+    asyncio.run(_run())
+
+
+@app.command()
+def run(
+    strategy: str = typer.Option("llm", "--strategy", "-s", help="Generation strategy"),
+    count: int = typer.Option(18, "--count", "-n", help="Alphas per batch"),
+    batches: int = typer.Option(1, "--batches", "-b", help="Number of batches"),
+    interval: int = typer.Option(60, "--interval", help="Seconds between batches"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Full pipeline: generate → backtest → evaluate → display."""
+    _setup_logging(verbose)
+
+    async def _run():
+        orch = Orchestrator()
+        try:
+            await orch.initialize()
+            strat = GenerationStrategy(strategy)
+            for batch_num in range(1, batches + 1):
+                console.print(f"\n[bold magenta]═══ Batch {batch_num}/{batches} ═══[/bold magenta]")
+                await orch.run(strategy=strat, count=count, auto_backtest=True)
+                if batch_num < batches:
+                    console.print(f"\n[dim]Waiting {interval}s before next batch...[/dim]")
+                    await asyncio.sleep(interval)
+        except Exception as e:
+            console.print(f"[bold red]Error: {e}[/bold red]")
+            raise typer.Exit(1)
+        finally:
+            await orch.close()
+
+    asyncio.run(_run())
+
+
+@app.command()
+def status(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Show overall statistics."""
+    _setup_logging(verbose)
+
+    async def _run():
+        orch = Orchestrator()
+        try:
+            await orch.initialize()
+            stats = await orch.status()
+            table = Table(title="WQ Agent Status")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Count", justify="right")
+            for key, val in stats.items():
+                table.add_row(key, str(val))
+            console.print(table)
+        finally:
+            await orch.close()
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    app()

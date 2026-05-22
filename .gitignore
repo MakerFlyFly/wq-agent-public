@@ -1,0 +1,12 @@
+.env
+credentials.json
+*.db
+__pycache__/
+*.pyc
+results/
+hopeful_alphas.json
+*.log
+.venv/
+dist/
+build/
+*.egg-info/

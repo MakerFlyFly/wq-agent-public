@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+import re
+import random
+from typing import Any
+
+from loguru import logger
+
+from ..models import WQDataField, WQOperator
+from ..llm.base import BaseLLMProvider
+from .base import BaseAlphaGenerator
+
+_ALPHA_PROMPT_TEMPLATE = """Generate {count} WorldQuant Brain alpha expressions.
+
+你是一位顶尖的量化因子研究员，专注于创造具有卓越预测能力的Alpha表达式。请基于金融经济学原理和市场微观结构知识，设计{count}个高质量的WorldQuant Brain表达式。
+
+## 核心设计理念
+
+**因子经济学逻辑**：
+- 动量效应：价格趋势的持续性
+- 均值回归：价格的回复特性
+- 波动率特征：风险与收益的关系
+- 流动性溢价：成交量蕴含的信息
+- 市场情绪：价量关系的异常表现
+
+Grammar Rules
+/* */ - Block comments for multiple lines
+; - Statement separator (not needed for last line)
+Last statement is the Alpha expression for BRAIN simulator
+Alpha expression cannot be assigned to a variable
+No classes, objects, pointers, or functions allowed
+
+**统计有效性准则**：
+- 信息比率最大化：信号与噪声比
+- 因子稳定性：在不同市场环境下保持有效
+- 单调性：因子值与预期收益的单调关系
+- 可解释性：基于扎实的金融逻辑
+
+## 技术实现要求
+
+**智能参数匹配**：
+- 动量类：短周期[10,20,30]捕捉近期趋势
+- 反转类：中周期[40,50,60]识别过度反应
+- 波动类：长周期[120,250]确保统计稳定性
+- 流动性类：多周期对比分析异常变化
+
+**噪声处理技术**：
+- 移动平均线：平滑噪声，突出趋势
+- 标准偏差：测量波动程度
+- 归一化：将不同时间窗口的因子值调整到同一尺度
+
+**嵌套结构逻辑**：
+- 单层：直接有效的原始信号
+- 双层：信号提炼与降噪处理
+- 三层：多维度特征融合与增强
+
+**操作符汇总
+
+**算术运算符 (Arithmetic):
+abs(x) - 绝对值
+add(x, y, filter=false) - 加法 (x + y)
+densify(x) - 分组字段稠密化
+divide(x, y) - 除法 (x / y)
+inverse(x) - 倒数 (1/x)
+log(x) - 自然对数
+max(x, y, ..) - 最大值
+min(x, y, ..) - 最小值
+multiply(x, y, filter=false) - 乘法 (x * y)
+power(x, y) - 幂运算 (x^y)
+reverse(x) - 取反 (-x)
+sign(x) - 符号函数
+signed_power(x, y) - 保留符号的幂运算
+sqrt(x) - 平方根
+subtract(x, y, filter=false) - 减法 (x - y)
+to_nan(x, value=0, reverse=false) - 值与NaN转换
+
+**逻辑运算符 (Logical):
+and(input1, input2) - 逻辑与
+if_else(input1, input2, input3) - 条件判断
+input1 < input2 - 小于比较
+input1 <= input2 - 小于等于
+input1 == input2 - 等于比较
+input1 > input2 - 大于比较
+input1 >= input2 - 大于等于
+input1 != input2 - 不等于
+is_nan(input) - 是否为NaN
+not(x) - 逻辑非
+or(input1, input2) - 逻辑或
+
+**时间序列运算符 (Time Series):
+days_from_last_change(x) - 上次变化天数
+hump(x, hump=0.01) - 限制变化幅度
+jump_decay(x, d, sensitivity=0.5, force=0.1) - 跳跃衰减
+kth_element(x, d, k) - 第K个值
+last_diff_value(x, d) - 最后一个不同值
+ts_arg_max(x, d) - 最大值相对索引
+ts_arg_min(x, d) - 最小值相对索引
+ts_av_diff(x, d) - 与均值的差
+ts_backfill(x, lookback=d, k=1, ignore="NAN") - 回填
+ts_corr(x, y, d) - 时间序列相关性
+ts_count_nans(x, d) - NaN计数
+ts_covariance(y, x, d) - 协方差
+ts_decay_linear(x, d, dense=false) - 线性衰减
+ts_delay(x, d) - 延迟值
+ts_delta(x, d) - 差值 (x - 延迟值)
+ts_max(x, d) - 时间序列最大值
+ts_mean(x, d) - 时间序列均值
+ts_min(x, d) - 时间序列最小值
+ts_product(x, d) - 时间序列乘积
+ts_quantile(x, d, driver="gaussian") - 分位数
+ts_rank(x, d, constant=0) - 时间序列排名
+ts_regression(y, x, d, lag=0, rettype=0) - 回归分析
+ts_scale(x, d, constant=0) - 时间序列缩放
+ts_std_dev(x, d) - 时间序列标准差
+ts_step(1) - 天数计数器
+ts_sum(x, d) - 时间序列求和
+ts_target_tvr_decay(x, lambda_min=0, lambda_max=1, target_tvr=0.1) - 目标换手率衰减
+ts_zscore(x, d) - 时间序列Z分数
+
+**横截面运算符 (Cross Sectional):
+normalize(x, useStd=false, limit=0.0) - 标准化
+quantile(x, driver=gaussian, sigma=1.0) - 分位数转换
+rank(x, rate=2) - 排名
+scale(x, scale=1, longscale=1, shortscale=1) - 缩放
+scale_down(x, constant=0) - 按比例缩放
+vector_neut(x, y) - 向量中性化
+winsorize(x, std=4) - 缩尾处理
+zscore(x) - Z分数
+
+**向量运算符 (Vector):
+vec_avg(x) - 向量均值
+vec_max(x) - 向量最大值
+vec_min(x) - 向量最小值
+vec_sum(x) - 向量求和
+
+**变换运算符 (Transformational):
+bucket(rank(x), range="0,1,0.1" or buckets="2,5,6,7,10") - 分桶
+generate_stats(alpha) - 生成统计量
+trade_when(x, y, z) - 条件交易
+
+**分组运算符 (Group):
+combo_a(alpha, nlength=250, mode='algo1') - 组合Alpha
+group_backfill(x, group, d, std=4.0) - 分组回填
+group_cartesian_product(g1, g2) - 笛卡尔积分组
+group_max(x, group) - 分组最大值
+group_mean(x, weight, group) - 分组均值
+group_min(x, group) - 分组最小值
+group_neutralize(x, group) - 分组中性化
+group_rank(x, group) - 分组排名
+group_scale(x, group) - 分组缩放
+group_zscore(x, group) - 分组Z分数
+
+**特殊运算符 (Special):
+in - 包含判断
+self_corr(input) - 自相关性
+universe_size - 宇宙大小
+
+**归约运算符 (Reduce):
+reduce_avg(input, threshold=0) - 平均值归约
+reduce_choose(input, nth, ignoreNan=true) - 选择归约
+reduce_count(input, threshold) - 计数归约
+reduce_ir(input) - IR归约
+reduce_kurtosis(input) - 峰度归约
+reduce_max(input) - 最大值归约
+reduce_min(input) - 最小值归约
+reduce_norm(input) - 范数归约
+reduce_percentage(input, percentage=0.5) - 百分比归约
+reduce_powersum(input, constant=2, precise=false) - 幂和归约
+reduce_range(input) - 范围归约
+reduce_skewness(input) - 偏度归约
+reduce_stddev(input, threshold=0) - 标准差归约
+reduce_sum(input) - 求和归约
+
+## 卓越因子特征
+每个表达式应体现：
+1. **经济学直觉**：基于公认的市场异象
+2. **计算鲁棒性**：避免过拟合和极端值敏感
+3. **交易可行性**：考虑实际执行成本
+4. **创新性**：在经典因子上进行合理改进
+
+**表达式不要太复杂
+
+可用字段：{fields}
+可用运算符：{operators}
+
+{previous_results_section}
+
+**重要规则（必须严格遵守）：**
+1. **CRITICAL：必须使用提供的「可用字段」列表中的完整字段ID**
+2. **CRITICAL：绝对禁止使用 close、volume、high、low、open 等不完整的字段名**
+3. **必须使用提供的「可用运算符」列表中的运算符**
+4. **每个表达式必须是独立的，不能有赋值或其他语法结构**
+5. **请严格按照 operator(field_id, numeric_parameter) 的格式编写**
+6. **如果违反以上规则，生成的表达式将被系统拒绝！**
+
+**错误示例（禁止使用）：**
+- ts_corr(rank(close), rank(volume), 10)
+- ts_sum(returns, 20) / ts_std_dev(returns, 20)
+
+**正确示例（使用格式）：**
+- ts_corr(rank(fnd72_pit_or_cr_q_oper_inc_to_tot_debt), rank(fnd72_pit_or_cr_q_oper_inc_to_tot_debt), 10)
+- divide(ts_sum(fnd72_pit_or_cr_q_oper_inc_to_tot_debt, 20), ts_std_dev(fnd72_pit_or_cr_q_oper_inc_to_tot_debt, 20))
+
+请深入思考每个表达式的金融逻辑基础、预期表现特征以及在实际投资中的适用性。设计完成后，直接输出{count}个表达式，每行一个，规则不允许有其他解释。
+Generate {count} expressions:"""
+
+
+class LLMAlphaGenerator(BaseAlphaGenerator):
+    def __init__(self, llm: BaseLLMProvider):
+        self.llm = llm
+
+    async def generate(
+        self,
+        data_fields: list[WQDataField],
+        operators: list[WQOperator],
+        previous_results: list[dict[str, Any]] | None = None,
+        count: int = 18,
+    ) -> list[str]:
+        fields_str = [f"{f.id} ({f.description or 'No description'})" for f in data_fields]
+        operators_by_cat: dict[str, list[str]] = {}
+        for op in operators:
+            cat = op.category or "Other"
+            operators_by_cat.setdefault(cat, []).append(
+                f"{op.name} ({op.description or 'No description'})"
+            )
+        operators_str: list[str] = []
+        for cat, ops in operators_by_cat.items():
+            sampled = random.sample(ops, min(len(ops), max(1, len(ops) // 2)))
+            operators_str.extend(sampled)
+
+        previous_section = ""
+        if previous_results:
+            previous_section = "\n## 上一次生成的结果\n"
+            previous_section += "以下是上一次生成的Alpha表达式及其表现：\n"
+            for i, r in enumerate(previous_results, 1):
+                if "alpha" in r and "performance" in r:
+                    expr = r["alpha"]
+                    fitness = r["performance"].get("fitness", 0)
+                    previous_section += f"{i}. 表达式: {expr}, 表现值: {fitness:.6f}\n"
+            previous_section += "\n## 因子优化要求\n"
+            previous_section += "1. 对于绝对值表现很差的因子，请直接舍弃\n"
+            previous_section += "2. 绝对值表现很好fitness接近0.5，或者大于0.5 但是负数的因子，请在前面增加负号\n"
+            previous_section += "3. 基于以上信息，生成新的改进后的Alpha表达式\n"
+
+        prompt = _ALPHA_PROMPT_TEMPLATE.format(
+            count=count,
+            fields="\n".join(fields_str),
+            operators="\n".join(operators_str),
+            previous_results_section=previous_section,
+        )
+
+        content = await self.llm.generate(prompt, temperature=0.3)
+        raw_expressions = self._parse_response(content)
+        cleaned = self._clean_expressions(raw_expressions)
+        logger.info(f"LLM generated {len(cleaned)} valid expressions from {len(raw_expressions)} raw")
+        return cleaned
+
+    def _parse_response(self, content: str) -> list[str]:
+        if "antml:thinking>" in content or "</thinking>" in content:
+            parts = content.split("</thinking>")
+            if len(parts) > 1:
+                content = parts[-1].strip()
+            parts2 = content.split("antml:thinking>")
+            if len(parts2) > 1:
+                content = parts2[-1].strip()
+
+        expressions: list[str] = []
+        skip_prefixes = (
+            "Hmm,", "Okay,", "I need", "Let me", "First,", "Then,", "Finally,",
+            "The expression", "Here is", "This is", "Let me think", "I think",
+            "Based on", "Using the", "Combining", "Creating", "Generating",
+            "python", "def ", "import ", "Expression:", "Answer:", "Result:", "Output:",
+            "#", "*", "Comment:",
+        )
+
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if any(line.startswith(p) for p in skip_prefixes):
+                continue
+            line = line.replace("`", "")
+            if ". " in line and line[0].isdigit():
+                line = line.split(". ", 1)[1]
+            if "(" in line and ")" in line:
+                expressions.append(line)
+
+        return expressions
+
+    def _clean_expressions(self, ideas: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        valid_funcs = {
+            "ts_mean", "divide", "subtract", "add", "multiply", "zscore",
+            "ts_rank", "ts_std_dev", "rank", "log", "sqrt", "ts_sum", "ts_min", "ts_max",
+            "ts_median", "ts_correlation", "ts_corr", "ts_covariance", "ts_regression",
+            "ts_decay_linear", "ts_argmax", "ts_argmin", "ts_product", "ts_skew",
+            "ts_kurtosis", "ts_entropy", "scale", "scale_standardize", "scale_normalize",
+            "rank_corr", "rank_kendall", "rank_percentile", "correlation", "covariance",
+            "regression", "min", "max", "median", "abs", "inverse", "sign", "power",
+            "signed_power", "reverse", "ts_delta", "ts_delay", "ts_zscore", "ts_scale",
+            "ts_quantile", "ts_av_diff", "ts_backfill", "ts_count_nans", "ts_arg_max",
+            "ts_arg_min", "ts_step", "normalize", "quantile", "scale_down", "vector_neut",
+            "winsorize", "group_neutralize", "group_rank", "group_zscore", "group_mean",
+            "group_min", "group_max", "group_scale", "group_backfill",
+        }
+        common_words = {"it", "the", "is", "are", "captures", "provides", "measures", "represents", "indicates"}
+
+        for idea in ideas:
+            fixed = self._fix_syntax(idea)
+            if re.match(r"^\d+\.?$|^[a-zA-Z]+$", fixed):
+                continue
+            found_words = [w for w in common_words if w in fixed.lower()]
+            if found_words:
+                continue
+            has_func = any(f in fixed for f in valid_funcs)
+            has_arith = any(op in fixed for op in ["+", "-", "*", "/"])
+            if not has_func and not has_arith:
+                continue
+            if "(" in fixed and ")" in fixed:
+                cleaned.append(fixed)
+
+        return cleaned
+
+    @staticmethod
+    def _fix_syntax(expr: str) -> str:
+        expr = re.sub(r"\[(\d+)\]", r"\1", expr)
+        expr = re.sub(r"\[(\d+),\s*\d+\]", r"\1", expr)
+        expr = re.sub(r"\[([^\]]+)\]", r"\1", expr)
+        expr = re.sub(r",\s*\)", ")", expr)
+        for kw in ("lookback_days", "lambda_max", "window", "period"):
+            expr = re.sub(rf"{kw}=(\d+)", r"\1", expr)
+        expr = re.sub(r"(\w+)\s+(\w+)\s+(\d+)\)", r"\1, \2, \3)", expr)
+        return expr.strip()
