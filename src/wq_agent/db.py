@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS wiki_embeddings_blob (
     embedding BLOB NOT NULL,
     updated_at TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS field_blacklist (
+    field_id TEXT PRIMARY KEY,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    last_reason TEXT,
+    last_seen TIMESTAMP NOT NULL
+);
 """
 
 
@@ -450,6 +457,56 @@ class Database:
             dim = r["dim"]
             out[r["page_path"]] = list(struct.unpack(f"{dim}f", r["embedding"]))
         return out
+
+    async def reset_stuck_backtesting(self) -> int:
+        """启动时回收上次被杀掉留下的 backtesting 状态。"""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "UPDATE alphas SET status = 'generated' WHERE status = 'backtesting'"
+        )
+        n = cursor.rowcount
+        await self._conn.commit()
+        return n
+
+    async def bump_field_blacklist(self, field_ids: list[str], reason: str = "sim_error") -> None:
+        assert self._conn is not None
+        if not field_ids:
+            return
+        now = datetime.now().isoformat()
+        for fid in field_ids:
+            await self._conn.execute(
+                """INSERT INTO field_blacklist (field_id, fail_count, last_reason, last_seen)
+                   VALUES (?, 1, ?, ?)
+                   ON CONFLICT(field_id) DO UPDATE SET
+                       fail_count = fail_count + 1,
+                       last_reason = excluded.last_reason,
+                       last_seen = excluded.last_seen""",
+                (fid, reason, now),
+            )
+        await self._conn.commit()
+
+    async def get_blacklisted_fields(self, min_fail_count: int = 3) -> set[str]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT field_id FROM field_blacklist WHERE fail_count >= ?",
+            (min_fail_count,),
+        )
+        rows = await cursor.fetchall()
+        return {r["field_id"] for r in rows}
+
+    async def list_field_blacklist(self) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT field_id, fail_count, last_reason, last_seen FROM field_blacklist ORDER BY fail_count DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def clear_field_blacklist(self) -> int:
+        assert self._conn is not None
+        cursor = await self._conn.execute("DELETE FROM field_blacklist")
+        await self._conn.commit()
+        return cursor.rowcount
 
     async def wiki_counts(self) -> dict[str, int]:
         assert self._conn is not None

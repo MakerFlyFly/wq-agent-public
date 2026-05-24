@@ -45,6 +45,9 @@ class Orchestrator:
 
     async def initialize(self) -> None:
         await self.db.connect()
+        recovered = await self.db.reset_stuck_backtesting()
+        if recovered:
+            logger.info(f"Recovered {recovered} alphas stuck in 'backtesting' from prior crash")
         await self.wq.connect()
         self._llm = LLMFactory.from_settings(self.settings)
 
@@ -115,6 +118,14 @@ class Orchestrator:
         console.print("\n[bold cyan]Fetching data fields and operators from WQ Brain...[/bold cyan]")
         data_fields = await self.wq.get_data_fields()
         operators = await self.wq.get_operators()
+        blacklist = await self.db.get_blacklisted_fields(min_fail_count=3)
+        if blacklist:
+            before = len(data_fields)
+            data_fields = [f for f in data_fields if f.id not in blacklist]
+            console.print(
+                f"  Filtered out [yellow]{before - len(data_fields)}[/yellow] blacklisted fields "
+                f"(known to fail WQ simulation)"
+            )
         console.print(f"  Loaded [green]{len(data_fields)}[/green] fields, [green]{len(operators)}[/green] operators")
 
         previous = await self.db.list_recent_backtested_alphas(limit=20)

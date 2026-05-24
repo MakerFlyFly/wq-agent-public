@@ -195,7 +195,11 @@ reduce_sum(input) - 求和归约
 3. **必须使用提供的「可用运算符」列表中的运算符**
 4. **每个表达式必须是独立的，不能有赋值或其他语法结构**
 5. **请严格按照 operator(field_id, numeric_parameter) 的格式编写**
-6. **如果违反以上规则，生成的表达式将被系统拒绝！**
+6. **CRITICAL：每个表达式最多嵌套 4 层括号**。超过 4 层会被自动丢弃。
+   合格示例（3 层）：`group_neutralize(rank(ts_delta(fnd6_assets, 60)), subindustry)`
+   不合格（5 层）：`quantile(normalize(ts_decay_linear(ts_rank(ts_delta(fnd6_assets, 60)), 20)))`
+   **简单 + 经济直觉清晰** 远胜复杂嵌套。深度嵌套是过拟合的信号。
+7. **如果违反以上规则，生成的表达式将被系统拒绝！**
 
 **错误示例（禁止使用）：**
 - ts_corr(rank(close), rank(volume), 10)
@@ -423,8 +427,23 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
 
         return expressions
 
+    MAX_NESTING_DEPTH = 4   # 超过 4 层嵌套的表达式直接丢弃，太复杂调起来不可能
+
+    @staticmethod
+    def _nesting_depth(expr: str) -> int:
+        depth = 0
+        max_depth = 0
+        for ch in expr:
+            if ch == "(":
+                depth += 1
+                max_depth = max(max_depth, depth)
+            elif ch == ")":
+                depth = max(depth - 1, 0)
+        return max_depth
+
     def _clean_expressions(self, ideas: list[str]) -> list[str]:
         cleaned: list[str] = []
+        rejected_complexity = 0
         valid_funcs = {
             "ts_mean", "divide", "subtract", "add", "multiply", "zscore",
             "ts_rank", "ts_std_dev", "rank", "log", "sqrt", "ts_sum", "ts_min", "ts_max",
@@ -452,9 +471,15 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
             has_arith = any(op in fixed for op in ["+", "-", "*", "/"])
             if not has_func and not has_arith:
                 continue
-            if "(" in fixed and ")" in fixed:
-                cleaned.append(fixed)
+            if "(" not in fixed or ")" not in fixed:
+                continue
+            if self._nesting_depth(fixed) > self.MAX_NESTING_DEPTH:
+                rejected_complexity += 1
+                continue
+            cleaned.append(fixed)
 
+        if rejected_complexity:
+            logger.info(f"Dropped {rejected_complexity} expressions exceeding nesting depth {self.MAX_NESTING_DEPTH}")
         return cleaned
 
     @staticmethod

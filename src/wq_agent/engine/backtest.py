@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from loguru import logger
 
@@ -9,6 +10,44 @@ from ..db import Database
 from ..models import AlphaRecord, AlphaStatus, BacktestResult, QualityGrade
 from ..wq.client import WQClient
 from .evaluator import AlphaEvaluator
+
+
+# WQ Brain 算子名 / 关键字（不算字段）
+_NOT_FIELD = frozenset({
+    # 算术 / 逻辑
+    "abs", "add", "and", "or", "not", "if_else", "is_nan", "to_nan", "sign",
+    "log", "sqrt", "power", "signed_power", "max", "min", "divide", "multiply",
+    "subtract", "inverse", "reverse", "densify",
+    # 时间序列
+    "ts_mean", "ts_std_dev", "ts_zscore", "ts_rank", "ts_delta", "ts_delay",
+    "ts_sum", "ts_min", "ts_max", "ts_corr", "ts_covariance", "ts_decay_linear",
+    "ts_regression", "ts_scale", "ts_quantile", "ts_av_diff", "ts_backfill",
+    "ts_count_nans", "ts_arg_max", "ts_arg_min", "ts_product", "ts_step",
+    "hump", "jump_decay", "days_from_last_change", "kth_element", "last_diff_value",
+    # 横截面
+    "rank", "zscore", "normalize", "quantile", "scale", "scale_down", "winsorize",
+    "vector_neut",
+    # 分组 / 向量
+    "group_neutralize", "group_rank", "group_zscore", "group_mean", "group_min",
+    "group_max", "group_scale", "group_backfill", "group_cartesian_product",
+    "vec_avg", "vec_max", "vec_min", "vec_sum",
+    # 变换 / 归约
+    "bucket", "trade_when", "generate_stats", "combo_a", "self_corr",
+    "reduce_avg", "reduce_choose", "reduce_count", "reduce_ir", "reduce_kurtosis",
+    "reduce_max", "reduce_min", "reduce_norm", "reduce_percentage", "reduce_powersum",
+    "reduce_range", "reduce_skewness", "reduce_stddev", "reduce_sum",
+    # 关键字
+    "true", "false", "in", "universe_size",
+    # 常见分组字段（虽然是字段但属于 universe 必备，不该 blacklist）
+    "subindustry", "industry", "sector", "country", "currency", "exchange",
+})
+
+_IDENT_RE = re.compile(r"\b[a-z][a-z0-9_]{2,}\b")
+
+
+def extract_field_candidates(expression: str) -> list[str]:
+    """从表达式里挑出疑似字段 ID（去掉算子名和数字）。"""
+    return sorted({m for m in _IDENT_RE.findall(expression) if m not in _NOT_FIELD})
 
 
 class BacktestEngine:
@@ -84,13 +123,16 @@ class BacktestEngine:
         if submit_result.get("status") == "error":
             msg = submit_result.get("message", "")
             logger.error(f"Simulation submit failed for alpha {alpha_id}: {msg}")
+            await self._record_failure(expression, reason=f"submit:{msg[:50]}")
             return None
 
         progress_url = submit_result["progress_url"]
         poll_result = await self.wq.poll_simulation(progress_url)
 
         if poll_result.get("status") != "complete":
-            logger.error(f"Simulation failed for alpha {alpha_id}: {poll_result.get('message')}")
+            err = str(poll_result.get("message", ""))[:80]
+            logger.error(f"Simulation failed for alpha {alpha_id}: {err}")
+            await self._record_failure(expression, reason=err or "sim_error")
             return None
 
         alpha_data = poll_result.get("alpha_data", {})
@@ -122,3 +164,9 @@ class BacktestEngine:
             await self.db.update_alpha_status(alpha_id, AlphaStatus.HIGH_QUALITY)
 
         return backtest
+
+    async def _record_failure(self, expression: str, reason: str) -> None:
+        """对 WQ 拒收的表达式，把里面的疑似字段记到 blacklist；多次失败的字段会被剔除。"""
+        fields = extract_field_candidates(expression)
+        if fields:
+            await self.db.bump_field_blacklist(fields, reason=reason)

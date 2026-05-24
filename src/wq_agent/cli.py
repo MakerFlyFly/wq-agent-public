@@ -230,6 +230,48 @@ def refine(
     asyncio.run(_run())
 
 
+fields_app = typer.Typer(name="fields", help="Field blacklist maintenance", add_completion=False)
+app.add_typer(fields_app, name="fields")
+
+
+@fields_app.command("blacklist")
+def fields_blacklist(
+    clear: bool = typer.Option(False, "--clear", help="Wipe blacklist"),
+    min_fails: int = typer.Option(3, "--min-fails", help="Show fields with fail_count >= N"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Show / clear the field blacklist (fields that repeatedly cause WQ sim errors)."""
+    _setup_logging(verbose)
+    from .db import Database
+
+    async def _run():
+        db = Database(get_settings().DB_PATH)
+        await db.connect()
+        try:
+            if clear:
+                n = await db.clear_field_blacklist()
+                console.print(f"[green]Cleared {n} blacklist entries[/green]")
+                return
+            rows = await db.list_field_blacklist()
+            rows = [r for r in rows if r["fail_count"] >= min_fails]
+            if not rows:
+                console.print(f"[yellow]No fields with fail_count >= {min_fails}[/yellow]")
+                return
+            table = Table(title=f"Field blacklist (fail_count >= {min_fails})")
+            table.add_column("Field", style="cyan")
+            table.add_column("Fails", justify="right", style="red")
+            table.add_column("Last reason", max_width=50)
+            table.add_column("Last seen", justify="right", style="dim")
+            for r in rows:
+                table.add_row(r["field_id"], str(r["fail_count"]),
+                              r["last_reason"] or "", r["last_seen"][:19])
+            console.print(table)
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @app.command()
 def status(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
