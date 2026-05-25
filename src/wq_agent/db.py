@@ -279,10 +279,16 @@ class Database:
             })
         return out
 
-    async def list_refine_candidates(self, limit: int = 10) -> list[dict[str, Any]]:
-        """差一点就过的 alpha：grade=MEDIUM（恰好 1 项 WQ 关键检查 FAIL），按 fitness 倒序。
+    async def list_refine_candidates(self, limit: int = 10, low_fitness_floor: float = 0.5) -> list[dict[str, Any]]:
+        """差一点就过的 alpha：MEDIUM 全部 + 高 fitness 的 LOW。按 fitness 倒序。
 
-        REJECT/LOW 不进 —— 改它们性价比低；HIGH 已可提交无需 refine。
+        - MEDIUM：只差 1 项 WQ 关键检查 FAIL，refine 性价比最高
+        - LOW with fitness >= low_fitness_floor：信号已经出来（fitness 高），但有 2+ 项 check
+          fail（典型是 sharpe 不达标），refine 可以同时修多项
+        - REJECT 不进——信号本身就是噪声，refine 也救不回来
+        - HIGH 已可提交无需 refine
+
+        改前：只挑 MEDIUM，但冷启动时常无 MEDIUM，refine 命令直接返回 0。
         """
         assert self._conn is not None
         cursor = await self._conn.execute(
@@ -290,10 +296,13 @@ class Database:
                       b.returns, b.grade, b.checks, b.created_at
                FROM alphas a
                JOIN backtest_results b ON a.id = b.alpha_id
-               WHERE b.grade = 'medium' AND b.fitness IS NOT NULL
-               ORDER BY b.fitness DESC, b.created_at DESC
+               WHERE b.fitness IS NOT NULL
+                 AND (b.grade = 'medium' OR (b.grade = 'low' AND b.fitness >= ?))
+               ORDER BY
+                  CASE b.grade WHEN 'medium' THEN 0 ELSE 1 END,
+                  b.fitness DESC, b.created_at DESC
                LIMIT ?""",
-            (limit,),
+            (low_fitness_floor, limit),
         )
         rows = await cursor.fetchall()
         out: list[dict[str, Any]] = []
@@ -330,6 +339,25 @@ class Database:
                WHERE b.fitness >= ?
                ORDER BY b.fitness DESC""",
             (min_fitness,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def list_top_fitness_alphas(self, limit: int = 5, min_fitness: float = 0.0) -> list[dict[str, Any]]:
+        """按 fitness 降序取 top-N，只要 fitness > min_fitness。用于 LLM prompt 的"历史模板"段。
+
+        和 list_high_quality_alphas 的区别：那个是用 MIN_FITNESS 阈值（通常 1.0）筛"可提交"的，
+        冷启动时永远为空。这个是 "把目前最好的 N 个端给 LLM 看"，哪怕 fitness 只有 0.4 也总比没有强。
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT a.expression, b.fitness, b.sharpe, b.turnover, b.returns, b.grade
+               FROM alphas a
+               JOIN backtest_results b ON a.id = b.alpha_id
+               WHERE b.fitness IS NOT NULL AND b.fitness > ?
+               ORDER BY b.fitness DESC
+               LIMIT ?""",
+            (min_fitness, limit),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

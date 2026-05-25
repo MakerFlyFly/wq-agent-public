@@ -118,7 +118,16 @@ class BacktestEngine:
 
     async def _backtest_single(self, alpha: AlphaRecord) -> BacktestResult | None:
         await self.db.update_alpha_status(alpha.id, AlphaStatus.BACKTESTING)
-        result = await self._backtest_expression(alpha.id, alpha.expression)
+        try:
+            result = await self._backtest_expression(alpha.id, alpha.expression)
+        except Exception as e:
+            # Retry-exhausted / network exception——之前会让 alpha 永远卡在 BACKTESTING，
+            # 下一轮 reset_stuck_backtesting 才会回收。这里直接 mark failed，但**不**牵连
+            # 表达式里的字段进黑名单（网络错误和字段无关，字段级别失败走 _backtest_expression
+            # 内的 _record_failure 分支）。
+            logger.error(f"Backtest exception for alpha {alpha.id}: {e}")
+            await self.db.update_alpha_status(alpha.id, AlphaStatus.FAILED)
+            return None
         if result and result.grade != QualityGrade.REJECT:
             await self.db.update_alpha_status(alpha.id, AlphaStatus.EVALUATED)
         else:

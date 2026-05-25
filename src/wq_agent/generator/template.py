@@ -34,6 +34,8 @@ class TemplateAlphaGenerator(BaseAlphaGenerator):
         operators: list[WQOperator],
         previous_results: list[dict[str, Any]] | None = None,
         count: int = 18,
+        forbidden_fields: list[dict[str, Any]] | None = None,
+        high_fitness_exemplars: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         selected_fields = random.sample(data_fields, min(self.max_fields, len(data_fields)))
         expressions: list[str] = []

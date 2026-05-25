@@ -14,5 +14,7 @@ class BaseAlphaGenerator(ABC):
         operators: list[WQOperator],
         previous_results: list[dict[str, Any]] | None = None,
         count: int = 18,
+        forbidden_fields: list[dict[str, Any]] | None = None,
+        high_fitness_exemplars: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         ...

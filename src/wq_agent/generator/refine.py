@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 from typing import Any
 
@@ -35,8 +36,8 @@ _FAIL_TO_HINT = {
 }
 
 
-_REFINE_PROMPT = """你是一位顶尖量化研究员。下面这个 alpha **差一项 WQ Brain 关键检查就能提交**，
-你的任务是基于它生成 {count} 个**微调变体**，目标是把它从 MEDIUM 推到 HIGH（可提交）。
+_REFINE_PROMPT = """你是一位顶尖量化研究员。下面这个 alpha 已经有可见的预测信号（{base_quality}），
+你的任务是基于它生成 {count} 个变体，目标是把所有 WQ Brain 关键检查推到 PASS（grade=HIGH）。
 
 ## 基础表达式
 
@@ -50,29 +51,37 @@ _REFINE_PROMPT = """你是一位顶尖量化研究员。下面这个 alpha **差
 - sharpe = {sharpe}
 - turnover = {turnover}
 - returns = {returns}
-- 失败检查：{failed}
+- 失败检查：{failed}  ← **总共 {n_fails} 项失败**
 
 ## 针对此失败检查的优化方向
 
 {hints}
 
-## 你可以做的微调维度（请在 {count} 个变体里覆盖多种维度）
+## 变体策略（根据失败项数自动选择）
 
-1. **调窗口** —— 把数字参数在 5 / 20 / 60 / 120 / 252 之间调整（保持算子结构）
+{strategy_section}
+
+## 可以做的变化维度（请在 {count} 个变体里覆盖多种）
+
+1. **调窗口** —— 把数字参数在 5 / 20 / 60 / 120 / 252 之间调整
 2. **加中性化** —— 包入 `group_neutralize(_, subindustry)` / `group_rank(_, subindustry)` / `vector_neut(_, ...)`
-3. **加平滑** —— 外层套 `ts_decay_linear(_, d)`、`ts_mean(_, d)`、`hump(_, hump=0.05)`
+3. **加平滑/降换手** —— 外层套 `ts_decay_linear(_, 5~20)`、`hump(_, hump=0.01~0.05)`
 4. **加预处理** —— 包入 `winsorize(_, std=4)` / `rank(_)` / `zscore(_)` / `ts_backfill(_, lookback=120)`
-5. **复合** —— `add(rank(原表达式), rank(相关信号))` 把弱信号叠加成强信号
-6. **换字段** —— 用同一 dataset 同语义字段替换其中 1 个（如 close↔vwap、cashflow_op↔cashflow）
+5. **复合多信号** —— `add(rank(原信号), rank(同向量价信号))` / `multiply(rank(信号A), rank(信号B))`
+6. **换同语义字段** —— 用同 dataset 等价字段替换（close↔vwap、cashflow_op↔cashflow、ni↔eps）
+7. **加非线性** —— 用 `signed_power(_, 0.5)`、`log(1+abs(_))*sign(_)` 压缩极端值（{nonlinear_hint}）
+8. **加条件门控** —— `trade_when(ts_std(returns,20) < threshold, signal, 0)` 选择性交易降换手提 sharpe
+
+{exemplars_section}
 
 ## 严格规则
 
-- **必须保留原表达式的核心结构** —— 不能完全重写
-- **不允许**：把算子语义级别替换（如 `ts_delta` → `ts_corr`、`rank` → `quantile`）
+- 保留原表达式的**核心信号方向**（动量/反转/价值等大类不能反向）
 - **不允许**：与原表达式 verbatim 重复
+- **多样性**：{count} 个变体之间不能高度雷同——至少覆盖 4 种以上变化维度
 - 每行一个完整表达式，不要解释，不要 `1.` 序号
 
-## 可用字段
+## 可用字段（已随机抽样 {n_fields_shown} / {n_fields_total} 个，鼓励真换字段）
 
 {fields}
 
@@ -83,6 +92,19 @@ _REFINE_PROMPT = """你是一位顶尖量化研究员。下面这个 alpha **差
 {knowledge_section}
 
 请直接输出 {count} 个变体表达式，每行一个："""
+
+
+def _build_strategy_section(n_fails: int) -> str:
+    """根据失败检查数动态选择 refine 策略——少则微调、多则结构性突变。"""
+    if n_fails <= 1:
+        return ("**只差 1 项**：以**微调**为主（调窗口/加 winsorize/加 group_neutralize），"
+                "保留核心结构，小步迭代。")
+    if n_fails == 2:
+        return ("**差 2 项**：需要**中等结构调整**。除微调外，至少有 1/3 的变体应该叠加复合信号 "
+                "（如 `add(rank(原), rank(同向信号))`）或在原信号外套非线性变换（signed_power）。")
+    return ("**差 3 项或更多**：base 距离 HIGH 还有距离，需要**激进重构**。约一半变体应做"
+            "结构性调整：复合信号、外层非线性变换、加 trade_when 条件门控、换主算子（rank→zscore、"
+            "ts_delta→ts_zscore）。保留信号方向但骨架可以变。")
 
 
 class RefineAlphaGenerator:
@@ -110,20 +132,24 @@ class RefineAlphaGenerator:
         data_fields: list,
         operators: list,
         count: int = 10,
+        high_fitness_exemplars: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         expression = base.get("expression", "")
         if not expression:
             return []
 
         failed = base.get("failed_checks") or []
+        n_fails = len(failed)
         hints = "\n".join(
             f"- {_FAIL_TO_HINT.get(name.upper(), '')}" for name in failed
             if name.upper() in _FAIL_TO_HINT
         ) or "- 无明显失败项，做小幅微调即可"
 
+        # 字段随机抽样 80 个（之前是前 30 个）——base 已用某些字段，让 LLM 真正能换
+        sample_n = min(len(data_fields), 80)
+        sampled_fields = random.sample(data_fields, sample_n) if len(data_fields) > sample_n else list(data_fields)
         fields_str = "\n".join(
-            f"{f.id} ({f.description or 'No description'})"
-            for f in data_fields[: min(len(data_fields), 30)]
+            f"{f.id} ({f.description or 'No description'})" for f in sampled_fields
         )
         operators_str = "\n".join(
             f"{op.name} ({op.description or ''})" for op in operators[: min(len(operators), 40)]
@@ -155,8 +181,28 @@ class RefineAlphaGenerator:
             except (TypeError, ValueError):
                 return str(v)
 
+        grade = (base.get("grade") or "").lower()
+        if grade == "medium":
+            base_quality = "MEDIUM —— 只差 1 项关键检查即可提交"
+            nonlinear_hint = "若 base 已较精炼，非线性变换通常起反效果，慎用"
+        elif grade == "low":
+            base_quality = f"LOW —— 信号已可见但有多项检查不达标（fitness={_fmt(base.get('fitness'))} 已超 0.5）"
+            nonlinear_hint = "base 是 LOW，鼓励引入非线性来突破当前 fitness 平台"
+        else:
+            base_quality = f"grade={grade or '?'}"
+            nonlinear_hint = "按需引入"
+
+        strategy_section = _build_strategy_section(n_fails)
+
+        # 把 exemplars 段塞进去（复用 LLMAlphaGenerator 的静态方法，行为完全一致）
+        exemplars_section = self._base_gen._build_exemplars_section(high_fitness_exemplars or [])
+
         prompt = _REFINE_PROMPT.format(
             count=count,
+            base_quality=base_quality,
+            n_fails=n_fails,
+            nonlinear_hint=nonlinear_hint,
+            strategy_section=strategy_section,
             expression=expression,
             fitness=_fmt(base.get("fitness")),
             sharpe=_fmt(base.get("sharpe")),
@@ -165,12 +211,19 @@ class RefineAlphaGenerator:
             failed=", ".join(failed) if failed else "—",
             hints=hints,
             fields=fields_str,
+            n_fields_shown=sample_n,
+            n_fields_total=len(data_fields),
             operators=operators_str,
             knowledge_section=knowledge_section,
+            exemplars_section=exemplars_section,
         )
 
-        logger.info(f"Refining alpha #{base.get('alpha_id')} ({expression[:50]}...)")
-        content = await self.llm.generate(prompt, temperature=0.4)
+        logger.info(
+            f"Refining alpha #{base.get('alpha_id')} grade={grade} n_fails={n_fails} "
+            f"({expression[:50]}...)"
+        )
+        # 温度从 0.4 提到 0.55——之前变体高度雷同，需要更大多样性
+        content = await self.llm.generate(prompt, temperature=0.55)
         raw = self._base_gen._parse_response(content)
         cleaned = self._base_gen._clean_expressions(raw)
 

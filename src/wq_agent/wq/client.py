@@ -37,7 +37,7 @@ class WQClient:
         method: str,
         path: str,
         *,
-        max_retries: int = 3,
+        max_retries: int = 5,
         **kwargs: Any,
     ) -> httpx.Response:
         client = await self._ensure_client()
@@ -56,12 +56,21 @@ class WQClient:
                     await asyncio.sleep(retry_after)
                     continue
                 return response
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError, httpx.RemoteProtocolError) as e:
                 last_exc = e
-                wait = 2 ** attempt
+                # 之前是 2**attempt → 1+2+4=7s（3 次）, WQ Brain 偶尔慢一拍直接挂。
+                # 改 5 次 + 上限 30s：1+2+4+8+16=31s, 足以扛过常见 60s rate-limit 后的恢复。
+                wait = min(2 ** attempt, 30)
                 logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
                 await asyncio.sleep(wait)
         raise last_exc or Exception(f"Request to {path} failed after {max_retries} retries")
+
+    # WQ Brain dataset 类目；之前硬编码只拉 fundamental 导致 LLM 永远只看到 fnd2/fnd6 字段。
+    # 这个列表覆盖 wiki/datasets 里出现过的所有类别。
+    DEFAULT_CATEGORIES: list[str] = [
+        "pv", "fundamental", "analyst", "model",
+        "news", "option", "sentiment", "socialmedia",
+    ]
 
     async def get_data_fields(
         self,
@@ -69,10 +78,12 @@ class WQClient:
         universe: str | None = None,
         delay: int | None = None,
         limit: int = 20,
+        categories: list[str] | None = None,
     ) -> list[WQDataField]:
         region = region or self.settings.WQ_REGION
         universe = universe or self.settings.WQ_UNIVERSE
         delay = delay if delay is not None else self.settings.WQ_DELAY
+        cats = categories or self.DEFAULT_CATEGORIES
         all_fields: list[WQDataField] = []
 
         delays = [delay]
@@ -80,24 +91,30 @@ class WQClient:
             delays = [1]
 
         for d in delays:
-            datasets_resp = await self._request(
-                "get",
-                "/data-sets",
-                params={
-                    "category": "fundamental",
-                    "delay": d,
-                    "instrumentType": "EQUITY",
-                    "region": region,
-                    "universe": universe,
-                    "limit": 50,
-                },
-            )
             dataset_ids: list[str] = []
-            if datasets_resp.status_code == 200:
-                results = datasets_resp.json().get("results", [])
-                dataset_ids = [ds["id"] for ds in results if "id" in ds]
+            for cat in cats:
+                datasets_resp = await self._request(
+                    "get",
+                    "/data-sets",
+                    params={
+                        "category": cat,
+                        "delay": d,
+                        "instrumentType": "EQUITY",
+                        "region": region,
+                        "universe": universe,
+                        "limit": 50,
+                    },
+                )
+                if datasets_resp.status_code == 200:
+                    results = datasets_resp.json().get("results", [])
+                    dataset_ids.extend(ds["id"] for ds in results if "id" in ds)
+            # 去重（不同 category 可能返回重复 dataset.id 不太可能，但保险）
+            dataset_ids = list(dict.fromkeys(dataset_ids))
             if not dataset_ids:
-                dataset_ids = ["fundamental6", "fundamental2", "analyst4", "model16", "model51", "news12"]
+                dataset_ids = [
+                    "pv1", "fundamental6", "fundamental2", "analyst4",
+                    "model16", "model51", "news12", "sentiment1",
+                ]
 
             for ds_id in dataset_ids:
                 count_resp = await self._request(

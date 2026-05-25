@@ -185,7 +185,8 @@ reduce_sum(input) - 求和归约
 
 可用字段：{fields}
 可用运算符：{operators}
-
+{forbidden_section}
+{exemplars_section}
 {knowledge_section}
 {previous_results_section}
 
@@ -232,6 +233,8 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         operators: list[WQOperator],
         previous_results: list[dict[str, Any]] | None = None,
         count: int = 18,
+        forbidden_fields: list[dict[str, Any]] | None = None,
+        high_fitness_exemplars: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         fields_str = [f"{f.id} ({f.description or 'No description'})" for f in data_fields]
         operators_by_cat: dict[str, list[str]] = {}
@@ -249,10 +252,16 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
 
         knowledge_section = await self._build_knowledge_section(data_fields, operators)
 
+        forbidden_section = self._build_forbidden_section(forbidden_fields)
+
+        exemplars_section = self._build_exemplars_section(high_fitness_exemplars)
+
         prompt = _ALPHA_PROMPT_TEMPLATE.format(
             count=count,
             fields="\n".join(fields_str),
             operators="\n".join(operators_str),
+            forbidden_section=forbidden_section,
+            exemplars_section=exemplars_section,
             knowledge_section=knowledge_section,
             previous_results_section=previous_section,
         )
@@ -358,6 +367,63 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         lines.append("")
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_forbidden_section(forbidden_fields: list[dict[str, Any]] | None) -> str:
+        """已被 orchestrator 从 fields 列表里删掉的字段—— LLM 看不到这条信息就会反复幻觉出来。
+
+        把 top-N 高失败次数的字段显式列在 prompt 里，并附上失败原因和别名建议（如果能推断），
+        让 LLM 主动避开而不是事后过滤。对应 QuantGPT llm_service.py 的 "禁止使用的变量" 段。
+        """
+        if not forbidden_fields:
+            return ""
+        top = forbidden_fields[:15]
+        lines = ["", "## 🚨 禁止使用的字段（历史 WQ 模拟反复报错）", ""]
+        for row in top:
+            fid = row.get("field_id", "?")
+            n = row.get("fail_count", 0)
+            reason = row.get("last_reason", "")
+            lines.append(f"- `{fid}` (失败 {n} 次, 原因: {reason})")
+        lines.append("")
+        lines.append("⚠️ 出现在以上列表的字段一律视为非法 ——"
+                     " 即使你认为它「应该」存在（如 close、volume、pe_ratio 等简写）。"
+                     "必须使用「可用字段」列表里出现的完整 field_id。")
+        lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_exemplars_section(exemplars: list[dict[str, Any]] | None) -> str:
+        """把项目自己 DB 里的高 fitness 历史 alpha 当模板锚点喂给 LLM。
+
+        对应 QuantGPT llm_service.py 的 "高 Fitness 模板" 段，但我们的来源是真实回测过的本地历史，
+        不是手写常量，所以会随着 db 累积自动迭代。
+        """
+        if not exemplars:
+            return ""
+        top = exemplars[:5]
+        lines = ["", "## 📈 本项目历史高 fitness 模板（参考结构，不要原样照抄）", ""]
+        lines.append("| fitness | sharpe | turnover | 表达式 |")
+        lines.append("| --- | --- | --- | --- |")
+        for row in top:
+            fit = row.get("fitness")
+            shp = row.get("sharpe")
+            tov = row.get("turnover")
+            expr = (row.get("expression") or "").replace("|", "\\|")[:120]
+
+            def _fmt(v):
+                if v is None:
+                    return "—"
+                try:
+                    return f"{float(v):.2f}"
+                except (TypeError, ValueError):
+                    return str(v)
+            lines.append(f"| {_fmt(fit)} | {_fmt(shp)} | {_fmt(tov)} | `{expr}` |")
+        lines.append("")
+        lines.append("以上是本账号过去真实回测到 fitness ≥ 阈值的因子。"
+                     "请参考其**结构组合方式**（算子层级、字段+算子搭配、外层标准化），"
+                     "但**必须换用不同字段或不同窗口**避免重复。")
+        lines.append("")
+        return "\n".join(lines)
+
     async def _build_knowledge_section(
         self,
         data_fields: list[WQDataField],
@@ -457,29 +523,66 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
             "ts_arg_min", "ts_step", "normalize", "quantile", "scale_down", "vector_neut",
             "winsorize", "group_neutralize", "group_rank", "group_zscore", "group_mean",
             "group_min", "group_max", "group_scale", "group_backfill",
+            # 之前漏掉的 WQ 算子（prompt 里推荐 LLM 用，但 validator 不认会误丢）：
+            # 逻辑 / 条件
+            "and", "or", "not", "is_nan", "if_else", "to_nan", "trade_when",
+            # 时序 / 控换手
+            "hump", "jump_decay", "days_from_last_change", "kth_element",
+            "last_diff_value", "ts_target_tvr_decay",
+            # 分组 / 向量 / 归约
+            "densify", "bucket", "combo_a", "generate_stats", "self_corr",
+            "group_cartesian_product",
+            "vec_avg", "vec_max", "vec_min", "vec_sum",
+            "reduce_avg", "reduce_choose", "reduce_count", "reduce_ir", "reduce_kurtosis",
+            "reduce_max", "reduce_min", "reduce_norm", "reduce_percentage",
+            "reduce_powersum", "reduce_range", "reduce_skewness", "reduce_stddev",
+            "reduce_sum",
         }
+        # 用整词匹配——之前用 substring 匹配 "is" 会误杀 is_nan 算子，"the"/"are" 也会
+        # 命中很多合法字段名（如 fnd*_assets 含 "are"... 实际是反过来其它字段含子串）。
+        # 整词匹配只在真正出现 "the/is/are/it" 等英文散字时才丢。
         common_words = {"it", "the", "is", "are", "captures", "provides", "measures", "represents", "indicates"}
+        common_word_re = re.compile(r"\b(" + "|".join(common_words) + r")\b", re.IGNORECASE)
+
+        # 按拒绝原因分桶，跑完后 debug 一行看到底是哪条规则砍掉了大头
+        reject_counts: dict[str, int] = {
+            "numeric_or_word_only": 0,
+            "contains_english_word": 0,
+            "no_func_no_arith": 0,
+            "missing_parens": 0,
+            "nesting_too_deep": 0,
+        }
 
         for idea in ideas:
             fixed = self._fix_syntax(idea)
             if re.match(r"^\d+\.?$|^[a-zA-Z]+$", fixed):
+                reject_counts["numeric_or_word_only"] += 1
                 continue
-            found_words = [w for w in common_words if w in fixed.lower()]
-            if found_words:
+            found = common_word_re.findall(fixed)
+            if found:
+                reject_counts["contains_english_word"] += 1
+                logger.debug(f"Rejected (english word {found}): {fixed[:80]}")
                 continue
             has_func = any(f in fixed for f in valid_funcs)
             has_arith = any(op in fixed for op in ["+", "-", "*", "/"])
             if not has_func and not has_arith:
+                reject_counts["no_func_no_arith"] += 1
                 continue
             if "(" not in fixed or ")" not in fixed:
+                reject_counts["missing_parens"] += 1
                 continue
             if self._nesting_depth(fixed) > self.MAX_NESTING_DEPTH:
+                reject_counts["nesting_too_deep"] += 1
                 rejected_complexity += 1
                 continue
             cleaned.append(fixed)
 
-        if rejected_complexity:
-            logger.info(f"Dropped {rejected_complexity} expressions exceeding nesting depth {self.MAX_NESTING_DEPTH}")
+        total_rejected = sum(reject_counts.values())
+        if total_rejected:
+            breakdown = ", ".join(f"{k}={v}" for k, v in reject_counts.items() if v)
+            logger.info(
+                f"Validation: kept {len(cleaned)}/{len(ideas)}, rejected {total_rejected} ({breakdown})"
+            )
         return cleaned
 
     @staticmethod
