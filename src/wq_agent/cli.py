@@ -296,6 +296,180 @@ def status(
     asyncio.run(_run())
 
 
+@app.command()
+def submittable(
+    min_fitness: float = typer.Option(1.0, "--min-fitness", help="Minimum fitness to show"),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """List alphas ready for submission (HIGH grade, not yet submitted).
+
+    Filter: grade=HIGH (all 6 critical WQ checks PASS) AND status != submitted
+    AND fitness >= --min-fitness AND SELF_CORRELATION not FAIL.
+    """
+    _setup_logging(verbose)
+    from .db import Database, expression_outer_signature
+
+    async def _run():
+        db = Database(get_settings().DB_PATH)
+        await db.connect()
+        try:
+            rows = await db.list_submittable_alphas(min_fitness=min_fitness, limit=limit)
+            if not rows:
+                console.print(f"[yellow]No submittable alphas (HIGH grade, fitness >= {min_fitness}, not yet submitted)[/yellow]")
+                return
+            table = Table(title=f"Submittable alphas ({len(rows)} candidates, fitness ≥ {min_fitness})")
+            table.add_column("ID", justify="right", style="cyan")
+            table.add_column("Fit", justify="right", style="green")
+            table.add_column("Sharpe", justify="right")
+            table.add_column("Turnover", justify="right")
+            table.add_column("Outer", style="magenta", max_width=30)
+            table.add_column("Expression", max_width=70)
+            table.add_column("WQ id", style="dim")
+            for r in rows:
+                outer = expression_outer_signature(r["expression"], levels=2)
+                table.add_row(
+                    str(r["alpha_id"]),
+                    f"{r['fitness']:.2f}" if r["fitness"] is not None else "—",
+                    f"{r['sharpe']:.2f}" if r["sharpe"] is not None else "—",
+                    f"{r['turnover']:.3f}" if r["turnover"] is not None else "—",
+                    outer or "",
+                    r["expression"][:68],
+                    r["wq_alpha_id"] or "—",
+                )
+            console.print(table)
+            console.print(f"\n[dim]Tip: run [bold]wq-agent submit <ID>[/bold] to mark as submitted, "
+                          f"or [bold]wq-agent sync-submitted[/bold] to pull real status from WQ Brain.[/dim]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@app.command()
+def submit(
+    alpha_id: int = typer.Argument(..., help="Local alpha id to mark as submitted"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Mark a local alpha as SUBMITTED (local bookkeeping only).
+
+    Does not call WQ Brain API — submit via the WQ web UI yourself, then run this
+    to update local state. Use [bold]wq-agent sync-submitted[/bold] to pull real
+    state from WQ Brain instead of marking one-by-one.
+    """
+    _setup_logging(verbose)
+    from .db import Database
+
+    async def _run():
+        db = Database(get_settings().DB_PATH)
+        await db.connect()
+        try:
+            alpha = await db.get_alpha(alpha_id)
+            if alpha is None:
+                console.print(f"[red]Alpha #{alpha_id} not found[/red]")
+                raise typer.Exit(1)
+            if alpha.status == AlphaStatus.SUBMITTED:
+                console.print(f"[yellow]Alpha #{alpha_id} already marked submitted at {alpha.submitted_at}[/yellow]")
+                return
+            await db.mark_alpha_submitted(alpha_id)
+            console.print(f"[green]✓ Marked alpha #{alpha_id} as SUBMITTED[/green]")
+            console.print(f"  expr: [dim]{alpha.expression[:120]}[/dim]")
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@app.command(name="sync-submitted")
+def sync_submitted(
+    limit: int = typer.Option(200, "--limit", "-n", help="Max alphas to fetch from WQ Brain"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Pull real submitted-alpha state from WQ Brain and reconcile with local DB.
+
+    For each alpha on WQ Brain:
+    - If a local alpha matches by wq_alpha_id or expression: mark it SUBMITTED.
+    - Otherwise insert it as an external SUBMITTED record (so its skeleton goes
+      on the LLM "don't regenerate" blacklist).
+    """
+    _setup_logging(verbose)
+    from datetime import datetime
+    from .db import Database
+    from .wq.client import WQClient
+
+    async def _run():
+        settings = get_settings()
+        db = Database(settings.DB_PATH)
+        await db.connect()
+        client = WQClient(settings)
+        await client.connect()
+        try:
+            console.print(f"[cyan]Fetching up to {limit} alphas from WQ Brain (filter on dateSubmitted)...[/cyan]")
+            remote = await client.get_submitted_alphas(limit=limit)
+            # WQ API 返回的是 dateCreated 倒序的全部 alpha（含 simulation 草稿），
+            # 真正"已提交"的判据是 dateSubmitted != null。
+            truly_submitted = [r for r in remote if r.get("dateSubmitted")]
+            console.print(
+                f"  Got [green]{len(remote)}[/green] remote rows total, "
+                f"[bold green]{len(truly_submitted)}[/bold green] truly submitted "
+                f"(dateSubmitted != null), [dim]{len(remote) - len(truly_submitted)}[/dim] are just simulation drafts."
+            )
+            matched = 0
+            inserted = 0
+            already = 0
+            for row in truly_submitted:
+                wq_id = row.get("id")
+                regular = row.get("regular") or {}
+                expression = regular.get("code") if isinstance(regular, dict) else None
+                if not (wq_id and expression):
+                    continue
+                date_submitted = None
+                date_str = row.get("dateSubmitted")
+                if date_str:
+                    try:
+                        # WQ format: "2026-05-26T02:12:27-04:00"
+                        date_submitted = datetime.fromisoformat(date_str)
+                    except (ValueError, TypeError):
+                        pass
+                # 优先 wq_alpha_id 匹配，没有就 expression 匹配
+                local_id = await db.find_alpha_by_wq_id(wq_id)
+                if local_id is None:
+                    local_id = await db.find_alpha_by_expression(expression)
+                if local_id is not None:
+                    alpha = await db.get_alpha(local_id)
+                    if alpha and alpha.status == AlphaStatus.SUBMITTED:
+                        already += 1
+                    else:
+                        await db.mark_alpha_submitted(local_id, date_submitted)
+                        matched += 1
+                else:
+                    # 远端有但本地没有 → 灌进来当 SUBMITTED 外部 alpha
+                    settings_dict = row.get("settings") or {}
+                    await db.upsert_external_submitted_alpha(
+                        wq_alpha_id=wq_id,
+                        expression=expression,
+                        date_submitted=date_submitted,
+                        is_metrics=row.get("is"),
+                        region=settings_dict.get("region", "USA"),
+                        universe=settings_dict.get("universe", "TOP3000"),
+                        delay=settings_dict.get("delay", 1),
+                        neutralization=settings_dict.get("neutralization", "INDUSTRY"),
+                    )
+                    inserted += 1
+            console.print(f"[green]✓ sync done[/green]: "
+                          f"[cyan]{matched}[/cyan] local matched, "
+                          f"[cyan]{inserted}[/cyan] external inserted, "
+                          f"[dim]{already}[/dim] already-submitted")
+            skeletons = await db.get_submitted_skeletons()
+            console.print(f"  Total submitted-skeletons now: [yellow]{len(skeletons)}[/yellow] "
+                          f"(LLM/refine prompt will exclude these from generation)")
+        finally:
+            await client.close()
+            await db.close()
+
+    asyncio.run(_run())
+
+
 @wiki_app.command("stats")
 def wiki_stats(verbose: bool = typer.Option(False, "--verbose", "-v")):
     """Show wiki page / edge / embedding counts."""

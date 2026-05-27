@@ -450,40 +450,220 @@ class Database:
         if not diversify_by_skeleton:
             return candidates[:limit]
 
-        # 两阶段去重：先按 outer signature（前 2 层算子）防 wrapper 家族霸屏，
-        # 再按 full skeleton 兜底（同 outer 但内层不同也算不同）。
-        # 每个 outer 家族只许 1 个代表（fitness 最高）。
-        seen_outer: set[str] = set()
-        seen_skeletons: set[str] = set()
-        diversified: list[dict[str, Any]] = []
-        for row in candidates:
-            expr = row.get("expression", "")
-            outer = expression_outer_signature(expr, levels=2)
-            if outer and outer in seen_outer:
-                continue
-            skel = expression_skeleton(expr)
-            if skel in seen_skeletons:
-                continue
-            seen_outer.add(outer)
-            seen_skeletons.add(skel)
-            diversified.append(row)
-            if len(diversified) >= limit:
-                break
+        # 三层去重，从严到松：
+        # (1) outer-1（最外层算子）每个最多 2 个 —— 防 LLM 强行把所有信号塞进同一个 wrapper
+        # (2) outer-2（前两层算子链）每个最多 1 个 —— 防同 wrapper 子家族重复
+        # (3) full skeleton 完全相同 → 跳过
+        # 如果严选下不够 limit，逐步放宽（先放 outer-1 配额，再放 outer-2 配额）。
+        from collections import Counter
+        OUTER1_QUOTA = 2
 
-        # 如果去重后不够 limit 个（库里架构种类太少），fallback 放宽到只看 skeleton
-        if len(diversified) < limit:
+        def _select(outer1_quota: int) -> list[dict[str, Any]]:
+            outer1_counts: Counter = Counter()
+            seen_outer2: set[str] = set()
+            seen_skeletons: set[str] = set()
+            picked: list[dict[str, Any]] = []
             for row in candidates:
-                if row in diversified:
+                expr = row.get("expression", "")
+                outer1 = expression_outer_signature(expr, levels=1)
+                outer2 = expression_outer_signature(expr, levels=2)
+                skel = expression_skeleton(expr)
+                if outer1 and outer1_counts[outer1] >= outer1_quota:
                     continue
-                skel = expression_skeleton(row.get("expression", ""))
+                if outer2 and outer2 in seen_outer2:
+                    continue
                 if skel in seen_skeletons:
                     continue
+                outer1_counts[outer1] += 1
+                seen_outer2.add(outer2)
                 seen_skeletons.add(skel)
-                diversified.append(row)
-                if len(diversified) >= limit:
+                picked.append(row)
+                if len(picked) >= limit:
                     break
+            return picked
 
-        return diversified[:limit]
+        # 严格策略：同一最外层算子最多 2 个。如果库里架构太单一拿不满 limit，
+        # **宁可返回更少的多样化样本，也不要 5 个同质样本拖垮 LLM 生成多样性**。
+        # 经验：Run 5 / Run 7 都是 exemplars 同质化（4-5 个同 op1）后产出崩盘。
+        # 至少要保证 ≥ 3 个，否则放松到 outer2 dedup。
+        picked = _select(OUTER1_QUOTA)
+        if len(picked) >= 3:
+            return picked  # 即使不到 limit 也返回，避免引入同质化
+        # 库里架构太少，放宽到只看 outer2
+        picked = _select(limit)
+        return picked[:limit]
+
+    # ------------------------------------------------------------- submission
+    # 用户场景：一个 alpha 提交到 WQ Brain 后就不要让 LLM 再生成同款。
+    # 三件事：(1) 标记本地 alpha 为 SUBMITTED；(2) 列出"可提交"候选；
+    # (3) 从 WQ Brain 同步真实提交状态（权威源在远端）。
+
+    async def mark_alpha_submitted(
+        self, alpha_id: int, submitted_at: datetime | None = None
+    ) -> None:
+        assert self._conn is not None
+        ts = (submitted_at or datetime.now()).isoformat()
+        await self._conn.execute(
+            "UPDATE alphas SET status = ?, submitted_at = ? WHERE id = ?",
+            (AlphaStatus.SUBMITTED.value, ts, alpha_id),
+        )
+        await self._conn.commit()
+
+    async def list_submittable_alphas(
+        self, min_fitness: float = 1.0, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """grade=HIGH（6 项 critical check 全 PASS）+ 尚未 SUBMITTED + fitness ≥ 阈值。
+
+        额外过滤 SELF_CORRELATION = FAIL（与已有 alpha 重复度高 → WQ 不会接受）。
+        同 wq_alpha_id 只留 fitness 最高的一个——refine 经常 verbatim 重复 base，
+        WQ 上是同一个 alpha entry，列两遍只会造成混淆。
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT a.id AS alpha_id, a.expression, a.status, a.created_at,
+                      b.fitness, b.sharpe, b.turnover, b.returns, b.grade,
+                      b.wq_alpha_id, b.checks
+               FROM alphas a
+               JOIN backtest_results b ON a.id = b.alpha_id
+               WHERE a.status != ?
+                 AND b.grade = 'high'
+                 AND b.fitness >= ?
+               ORDER BY b.fitness DESC, b.created_at DESC""",
+            (AlphaStatus.SUBMITTED.value, min_fitness),
+        )
+        rows = await cursor.fetchall()
+        seen_wq_ids: set[str] = set()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            checks: list[dict] = []
+            if r["checks"]:
+                try:
+                    checks = json.loads(r["checks"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            # SELF_CORRELATION 显式 FAIL 的过滤掉；PENDING 仍允许（WQ 还没算）
+            sc_fail = any(
+                str(c.get("name", "")).upper() == "SELF_CORRELATION"
+                and str(c.get("result", "")).upper() == "FAIL"
+                for c in checks if isinstance(c, dict)
+            )
+            if sc_fail:
+                continue
+            wq_id = r["wq_alpha_id"]
+            if wq_id and wq_id in seen_wq_ids:
+                continue
+            if wq_id:
+                seen_wq_ids.add(wq_id)
+            out.append({
+                "alpha_id": r["alpha_id"],
+                "expression": r["expression"],
+                "fitness": r["fitness"],
+                "sharpe": r["sharpe"],
+                "turnover": r["turnover"],
+                "returns": r["returns"],
+                "grade": r["grade"],
+                "wq_alpha_id": wq_id,
+                "status": r["status"],
+            })
+            if len(out) >= limit:
+                break
+        return out
+
+    async def list_submitted_alphas(self, limit: int = 200) -> list[dict[str, Any]]:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT a.id AS alpha_id, a.expression, a.submitted_at, a.llm_model,
+                      b.fitness, b.sharpe, b.turnover, b.wq_alpha_id
+               FROM alphas a
+               LEFT JOIN backtest_results b ON a.id = b.alpha_id
+               WHERE a.status = ?
+               ORDER BY a.submitted_at DESC NULLS LAST
+               LIMIT ?""",
+            (AlphaStatus.SUBMITTED.value, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_submitted_skeletons(self) -> set[str]:
+        """用于 LLM/refine prompt 黑名单——已提交的因子骨架不要再生成同款。
+
+        使用完整 expression_skeleton（field 替换为 FIELD、数字替换为 N）作为相同性判据。
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT expression FROM alphas WHERE status = ?",
+            (AlphaStatus.SUBMITTED.value,),
+        )
+        rows = await cursor.fetchall()
+        skeletons = {expression_skeleton(r["expression"]) for r in rows if r["expression"]}
+        skeletons.discard("")
+        return skeletons
+
+    async def find_alpha_by_wq_id(self, wq_alpha_id: str) -> int | None:
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT alpha_id FROM backtest_results WHERE wq_alpha_id = ? LIMIT 1",
+            (wq_alpha_id,),
+        )
+        r = await cursor.fetchone()
+        return r["alpha_id"] if r else None
+
+    async def find_alpha_by_expression(self, expression: str) -> int | None:
+        """fallback 匹配——如果 wq_alpha_id 对不上（可能 simulation 时没存），
+        按 expression 完全相等找。"""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT id FROM alphas WHERE expression = ? LIMIT 1",
+            (expression,),
+        )
+        r = await cursor.fetchone()
+        return r["id"] if r else None
+
+    async def upsert_external_submitted_alpha(
+        self,
+        wq_alpha_id: str,
+        expression: str,
+        date_submitted: datetime | None,
+        is_metrics: dict | None = None,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        delay: int = 1,
+        neutralization: str = "INDUSTRY",
+    ) -> int:
+        """同步：把 WQ Brain 上有但本地没有的 alpha 灌进来，标记 SUBMITTED。
+
+        这样它的骨架就进入 get_submitted_skeletons() 的黑名单，LLM 不会再生成。
+        is_metrics 是 WQ 返回的 'is' 字段 dict（含 sharpe/fitness/turnover/checks/returns）。
+        """
+        assert self._conn is not None
+        ts = (date_submitted or datetime.now()).isoformat()
+        # 先看 expression 是否已存在
+        existing = await self.find_alpha_by_expression(expression)
+        if existing is not None:
+            await self.mark_alpha_submitted(existing, date_submitted)
+            return existing
+        # 否则插入新的 external alpha
+        cursor = await self._conn.execute(
+            """INSERT INTO alphas (expression, strategy, llm_model, status, created_at, submitted_at)
+               VALUES (?, 'llm', 'external:wq_brain', ?, ?, ?)""",
+            (expression, AlphaStatus.SUBMITTED.value, ts, ts),
+        )
+        new_id = cursor.lastrowid
+        # 如果有 is metrics，也写一条 backtest_result 以便 list_*_alphas 能看见 fitness
+        if is_metrics:
+            checks_json = json.dumps(is_metrics.get("checks", []), ensure_ascii=False) if is_metrics.get("checks") else None
+            await self._conn.execute(
+                """INSERT INTO backtest_results
+                   (alpha_id, region, universe, delay, decay, neutralization,
+                    sharpe, turnover, fitness, returns, drawdown, grade, checks, wq_alpha_id, created_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
+                (new_id, region, universe, delay, neutralization,
+                 is_metrics.get("sharpe"), is_metrics.get("turnover"), is_metrics.get("fitness"),
+                 is_metrics.get("returns"), is_metrics.get("drawdown"),
+                 checks_json, wq_alpha_id, ts),
+            )
+        await self._conn.commit()
+        return new_id
 
     async def get_stats(self) -> dict[str, int]:
         assert self._conn is not None

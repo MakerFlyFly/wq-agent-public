@@ -74,6 +74,8 @@ _REFINE_PROMPT = """你是一位顶尖量化研究员。下面这个 alpha 已�
 
 {proven_wrappers_section}
 
+{submitted_skeletons_section}
+
 {exemplars_section}
 
 ## 严格规则
@@ -145,6 +147,7 @@ class RefineAlphaGenerator:
         operators: list,
         count: int = 10,
         high_fitness_exemplars: list[dict[str, Any]] | None = None,
+        submitted_skeletons: set[str] | None = None,
     ) -> list[str]:
         expression = base.get("expression", "")
         if not expression:
@@ -212,6 +215,7 @@ class RefineAlphaGenerator:
 
         # 把 exemplars 段塞进去（复用 LLMAlphaGenerator 的静态方法，行为完全一致）
         exemplars_section = self._base_gen._build_exemplars_section(high_fitness_exemplars or [])
+        submitted_skeletons_section = self._base_gen._build_submitted_skeletons_section(submitted_skeletons or set())
 
         prompt = _REFINE_PROMPT.format(
             count=count,
@@ -232,6 +236,7 @@ class RefineAlphaGenerator:
             operators=operators_str,
             knowledge_section=knowledge_section,
             proven_wrappers_section=PROVEN_WRAPPERS_SECTION,
+            submitted_skeletons_section=submitted_skeletons_section,
             exemplars_section=exemplars_section,
         )
 
@@ -249,6 +254,15 @@ class RefineAlphaGenerator:
         # 去掉跟 base 完全相同的（regex 友好的简单 dedup）
         base_norm = re.sub(r"\s+", "", expression)
         deduped = [e for e in cleaned if re.sub(r"\s+", "", e) != base_norm]
+        # 兜底过滤：骨架命中 submitted 的也丢——WQ 上已经存在，回测纯浪费
+        if submitted_skeletons:
+            from .. import db as _db_mod
+            before = len(deduped)
+            deduped = [e for e in deduped if _db_mod.expression_skeleton(e) not in submitted_skeletons]
+            if before != len(deduped):
+                logger.info(
+                    f"Dropped {before - len(deduped)} variants matching submitted-alpha skeleton"
+                )
         logger.info(
             f"Refine produced {len(deduped)} variants from {len(raw)} raw "
             f"(dropped {len(cleaned) - len(deduped)} duplicates of base)"

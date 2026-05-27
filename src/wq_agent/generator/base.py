@@ -16,5 +16,6 @@ class BaseAlphaGenerator(ABC):
         count: int = 18,
         forbidden_fields: list[dict[str, Any]] | None = None,
         high_fitness_exemplars: list[dict[str, Any]] | None = None,
+        submitted_skeletons: set[str] | None = None,
     ) -> list[str]:
         ...

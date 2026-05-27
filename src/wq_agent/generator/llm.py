@@ -186,6 +186,7 @@ reduce_sum(input) - 求和归约
 可用字段：{fields}
 可用运算符：{operators}
 {forbidden_section}
+{submitted_skeletons_section}
 {proven_wrappers_section}
 {exemplars_section}
 {knowledge_section}
@@ -275,6 +276,7 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         count: int = 18,
         forbidden_fields: list[dict[str, Any]] | None = None,
         high_fitness_exemplars: list[dict[str, Any]] | None = None,
+        submitted_skeletons: set[str] | None = None,
     ) -> list[str]:
         fields_str = [f"{f.id} ({f.description or 'No description'})" for f in data_fields]
         operators_by_cat: dict[str, list[str]] = {}
@@ -296,11 +298,14 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
 
         exemplars_section = self._build_exemplars_section(high_fitness_exemplars)
 
+        submitted_skeletons_section = self._build_submitted_skeletons_section(submitted_skeletons)
+
         prompt = _ALPHA_PROMPT_TEMPLATE.format(
             count=count,
             fields="\n".join(fields_str),
             operators="\n".join(operators_str),
             forbidden_section=forbidden_section,
+            submitted_skeletons_section=submitted_skeletons_section,
             proven_wrappers_section=PROVEN_WRAPPERS_SECTION,
             exemplars_section=exemplars_section,
             knowledge_section=knowledge_section,
@@ -310,6 +315,15 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         content = await self.llm.generate(prompt, temperature=0.3)
         raw_expressions = self._parse_response(content)
         cleaned = self._clean_expressions(raw_expressions)
+        # 兜底过滤：即使 prompt 里说了"不要做同款"，LLM 还是可能造出同骨架的，
+        # 这里二次过滤——只要骨架命中 submitted 集合就丢掉，避免浪费回测。
+        if submitted_skeletons:
+            from .. import db as _db_mod
+            before = len(cleaned)
+            cleaned = [e for e in cleaned if _db_mod.expression_skeleton(e) not in submitted_skeletons]
+            dropped = before - len(cleaned)
+            if dropped:
+                logger.info(f"Dropped {dropped} expressions whose skeleton matches an already-submitted alpha")
         logger.info(f"LLM generated {len(cleaned)} valid expressions from {len(raw_expressions)} raw")
         return cleaned
 
@@ -428,6 +442,29 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         lines.append("⚠️ 出现在以上列表的字段一律视为非法 ——"
                      " 即使你认为它「应该」存在（如 close、volume、pe_ratio 等简写）。"
                      "必须使用「可用字段」列表里出现的完整 field_id。")
+        lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_submitted_skeletons_section(skeletons: set[str] | None) -> str:
+        """已 SUBMITTED 因子的骨架黑名单 —— LLM 不要生成同款（即使换字段或调窗口）。
+
+        和 forbidden_fields 段不同：那个是字段级别黑名单（pe_ratio 这种），这个是
+        结构级别黑名单。同骨架意味着只是换了字段/数字，对 WQ 来说是"同一个因子"。
+        """
+        if not skeletons:
+            return ""
+        # 不全列（可能 500+），只显示一个汇总 + 最具代表性的样本
+        sample = list(skeletons)[:8]
+        lines = ["", f"## 🚫 已提交的结构骨架（共 {len(skeletons)} 个）—— 不要再生成同款", ""]
+        lines.append("以下骨架已经在 WQ Brain 正式提交过，**即使你换字段或换窗口数字也算同款**，")
+        lines.append("会被系统过滤掉浪费生成名额。请创造**结构上不同**的因子。")
+        lines.append("")
+        lines.append("样例骨架（FIELD 表示任意字段，N 表示任意数字）：")
+        for skel in sample:
+            lines.append(f"- `{skel[:120]}`")
+        if len(skeletons) > len(sample):
+            lines.append(f"- ... 还有 {len(skeletons) - len(sample)} 个")
         lines.append("")
         return "\n".join(lines)
 

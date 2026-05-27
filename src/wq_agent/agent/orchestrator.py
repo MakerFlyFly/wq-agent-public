@@ -146,10 +146,17 @@ class Orchestrator:
                 f"(best fitness {best_fit:.2f})"
             )
 
+        submitted_skeletons = await self.db.get_submitted_skeletons()
+        if submitted_skeletons:
+            console.print(
+                f"  Excluding [yellow]{len(submitted_skeletons)}[/yellow] submitted-alpha skeletons from generation"
+            )
+
         console.print(f"\n[bold cyan]Generating {count} alphas using {strategy.value} strategy...[/bold cyan]")
         expressions = await generator.generate(
             data_fields, operators, previous_results=previous, count=count,
             forbidden_fields=forbidden, high_fitness_exemplars=exemplars,
+            submitted_skeletons=submitted_skeletons,
         )
         console.print(f"  Generated [green]{len(expressions)}[/green] valid expressions")
 
@@ -245,11 +252,13 @@ class Orchestrator:
 
         # 把历史 top-fitness 也喂给 refine——base 可能就是 top-1，但其它 top 给 LLM 更多模式参考
         exemplars = await self.db.list_top_fitness_alphas(limit=5, min_fitness=0.0)
+        submitted_skeletons = await self.db.get_submitted_skeletons()
 
         console.print(f"[cyan]Generating {count} refine variants...[/cyan]")
         variants = await refiner.refine(
             base, data_fields, operators, count=count,
             high_fitness_exemplars=exemplars,
+            submitted_skeletons=submitted_skeletons,
         )
         if not variants:
             console.print("[yellow]Refine returned 0 variants[/yellow]")
