@@ -262,11 +262,13 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         wiki_retriever: "HybridRetriever | None" = None,
         wiki_top_k: int = 5,
         wiki_summary_chars: int = 200,
+        temperature: float = 0.3,
     ):
         self.llm = llm
         self.wiki_retriever = wiki_retriever
         self.wiki_top_k = wiki_top_k
         self.wiki_summary_chars = wiki_summary_chars
+        self.temperature = temperature
 
     async def generate(
         self,
@@ -277,6 +279,7 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         forbidden_fields: list[dict[str, Any]] | None = None,
         high_fitness_exemplars: list[dict[str, Any]] | None = None,
         submitted_skeletons: set[str] | None = None,
+        extra_exclude_skeletons: set[str] | None = None,
     ) -> list[str]:
         fields_str = [f"{f.id} ({f.description or 'No description'})" for f in data_fields]
         operators_by_cat: dict[str, list[str]] = {}
@@ -312,20 +315,44 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
             previous_results_section=previous_section,
         )
 
-        content = await self.llm.generate(prompt, temperature=0.3)
+        content = await self.llm.generate(prompt, temperature=self.temperature)
         raw_expressions = self._parse_response(content)
         cleaned = self._clean_expressions(raw_expressions)
         # 兜底过滤：即使 prompt 里说了"不要做同款"，LLM 还是可能造出同骨架的，
-        # 这里二次过滤——只要骨架命中 submitted 集合就丢掉，避免浪费回测。
-        if submitted_skeletons:
+        # 这里二次过滤——骨架命中"已存在"集合就丢掉，避免浪费回测。
+        #   submitted_skeletons     : 已提交 + self_corr FAIL（也在 prompt 里展示给 LLM）
+        #   extra_exclude_skeletons : 历史已回测且始终低分的骨架（只用于过滤，不展示）
+        exclude = set(submitted_skeletons or ()) | set(extra_exclude_skeletons or ())
+        if exclude:
             from .. import db as _db_mod
             before = len(cleaned)
-            cleaned = [e for e in cleaned if _db_mod.expression_skeleton(e) not in submitted_skeletons]
+            cleaned = [e for e in cleaned if _db_mod.expression_skeleton(e) not in exclude]
             dropped = before - len(cleaned)
             if dropped:
-                logger.info(f"Dropped {dropped} expressions whose skeleton matches an already-submitted alpha")
+                logger.info(f"Dropped {dropped} expressions whose skeleton matches an existing/known-low alpha")
+        # 批内去重：同一次产出里同骨架（仅换字段/窗口）的只留第一个，避免把近似克隆
+        # 一起塞进回测队列浪费额度。
+        before = len(cleaned)
+        cleaned = self._dedup_by_skeleton(cleaned)
+        if before - len(cleaned):
+            logger.info(f"Intra-batch dedup: dropped {before - len(cleaned)} same-skeleton duplicates")
         logger.info(f"LLM generated {len(cleaned)} valid expressions from {len(raw_expressions)} raw")
         return cleaned
+
+    @staticmethod
+    def _dedup_by_skeleton(expressions: list[str]) -> list[str]:
+        """按结构骨架去重，保留首次出现。空骨架（解析不出结构）一律保留。"""
+        from .. import db as _db_mod
+        seen: set[str] = set()
+        out: list[str] = []
+        for expr in expressions:
+            skel = _db_mod.expression_skeleton(expr)
+            if skel and skel in seen:
+                continue
+            if skel:
+                seen.add(skel)
+            out.append(expr)
+        return out
 
     @staticmethod
     def _build_previous_results_section(previous_results: list[dict[str, Any]] | None) -> str:

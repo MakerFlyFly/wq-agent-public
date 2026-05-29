@@ -297,6 +297,64 @@ def status(
 
 
 @app.command()
+def diversity(
+    limit: int = typer.Option(20, "--limit", "-n", help="Top wrapper families to show"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Show structural redundancy of the alpha library (outer-2 wrapper families).
+
+    家族数 ≪ alpha 数 = 结构单一栽培。看哪个 wrapper 壳子霸屏，以及它是否真有用
+    （avg/max fitness）——霸屏但低分的家族就是该让生成器换花样的信号。
+    """
+    _setup_logging(verbose)
+    from .db import Database
+
+    async def _run():
+        db = Database(get_settings().DB_PATH)
+        await db.connect()
+        try:
+            dist = await db.get_skeleton_distribution(limit=limit)
+            total = dist["total_backtested"]
+            if not total:
+                console.print("[yellow]No backtested alphas yet.[/yellow]")
+                return
+            uniq_skel = dist["unique_skeletons"]
+            uniq_o2 = dist["unique_outer2"]
+            console.print(
+                f"\n[bold]Backtested alphas:[/bold] {total} | "
+                f"[bold]unique skeletons:[/bold] {uniq_skel} | "
+                f"[bold]unique wrapper families (outer-2):[/bold] {uniq_o2}"
+            )
+            ratio = uniq_o2 / total if total else 0
+            color = "red" if ratio < 0.2 else "yellow" if ratio < 0.4 else "green"
+            console.print(
+                f"  family/alpha ratio: [{color}]{ratio:.0%}[/{color}] "
+                f"[dim](越低越单一；< 20% 说明结构高度集中)[/dim]"
+            )
+            table = Table(title=f"Top {len(dist['top_outer2'])} wrapper families by count")
+            table.add_column("#", justify="right", style="dim")
+            table.add_column("Count", justify="right", style="cyan")
+            table.add_column("Avg fit", justify="right")
+            table.add_column("Max fit", justify="right", style="green")
+            table.add_column("Outer-2 signature", style="magenta")
+            for i, fam in enumerate(dist["top_outer2"], 1):
+                avg = fam["avg_fitness"]
+                mx = fam["max_fitness"]
+                table.add_row(
+                    str(i),
+                    str(fam["count"]),
+                    f"{avg:.2f}" if avg is not None else "—",
+                    f"{mx:.2f}" if mx is not None else "—",
+                    fam["signature"],
+                )
+            console.print(table)
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+@app.command()
 def submittable(
     min_fitness: float = typer.Option(1.0, "--min-fitness", help="Minimum fitness to show"),
     limit: int = typer.Option(50, "--limit", "-n"),

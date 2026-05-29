@@ -646,6 +646,83 @@ class Database:
 
         return skeletons
 
+    async def get_low_fitness_skeletons(self, max_fitness: float = 0.3) -> set[str]:
+        """历史已回测、且(同骨架的)最佳 fitness 始终低于 max_fitness 的结构骨架。
+
+        用于阻止"反复重测已知低分结构"——每轮生成都可能重造一个上轮已测为 LOW/REJECT
+        的骨架，白白再花一次模拟去重新发现它很差，库里也堆满近似克隆。
+
+        关键：以**骨架**为粒度取全局最佳 fitness，而非单个 alpha。同一骨架只要有过一次
+        fitness ≥ max_fitness（说明该结构有潜力），就不排除——换字段/窗口仍值得重试。
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT a.expression, b.fitness
+               FROM alphas a JOIN backtest_results b ON a.id = b.alpha_id
+               WHERE b.fitness IS NOT NULL"""
+        )
+        best: dict[str, float] = {}
+        for r in await cursor.fetchall():
+            expr = r["expression"]
+            if not expr:
+                continue
+            skel = expression_skeleton(expr)
+            if not skel:
+                continue
+            fit = r["fitness"]
+            if skel not in best or fit > best[skel]:
+                best[skel] = fit
+        return {s for s, f in best.items() if f < max_fitness}
+
+    async def get_skeleton_distribution(self, limit: int = 20) -> dict[str, Any]:
+        """库里已回测 alpha 的结构集中度报告，用于让"重复度"可见。
+
+        按 outer-2 wrapper 家族（最外两层算子链）聚合——这是 redundancy 的主轴：
+        家族数远小于 alpha 数 = 结构单一栽培。返回 top 家族的数量 + 平均/最佳 fitness，
+        既看"哪个壳子霸屏"也看"霸屏的壳子是不是真有用"。
+        """
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """SELECT a.expression, b.fitness
+               FROM alphas a JOIN backtest_results b ON a.id = b.alpha_id
+               WHERE a.expression IS NOT NULL AND a.expression != ''"""
+        )
+        rows = await cursor.fetchall()
+
+        outer2_counts: dict[str, int] = {}
+        outer2_fits: dict[str, list[float]] = {}
+        skel_set: set[str] = set()
+        total = 0
+        for r in rows:
+            expr = r["expression"]
+            sig = expression_outer_signature(expr, levels=2)
+            skel = expression_skeleton(expr)
+            if skel:
+                skel_set.add(skel)
+            if not sig:
+                continue
+            total += 1
+            outer2_counts[sig] = outer2_counts.get(sig, 0) + 1
+            if r["fitness"] is not None:
+                outer2_fits.setdefault(sig, []).append(r["fitness"])
+
+        def _family(sig: str) -> dict[str, Any]:
+            fits = outer2_fits.get(sig, [])
+            return {
+                "signature": sig,
+                "count": outer2_counts[sig],
+                "avg_fitness": (sum(fits) / len(fits)) if fits else None,
+                "max_fitness": max(fits) if fits else None,
+            }
+
+        top = sorted(outer2_counts, key=lambda s: outer2_counts[s], reverse=True)[:limit]
+        return {
+            "total_backtested": total,
+            "unique_skeletons": len(skel_set),
+            "unique_outer2": len(outer2_counts),
+            "top_outer2": [_family(s) for s in top],
+        }
+
     async def update_backtest_checks(self, alpha_id: int, checks: list[dict]) -> None:
         """覆盖本地 backtest_results.checks——WQ 的 self_correlation 是异步算的，
         sync 时拉到最新的 checks 数据写回，让 self-corr FAIL 等状态及时反映到本地。

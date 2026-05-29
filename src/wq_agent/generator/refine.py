@@ -148,6 +148,7 @@ class RefineAlphaGenerator:
         count: int = 10,
         high_fitness_exemplars: list[dict[str, Any]] | None = None,
         submitted_skeletons: set[str] | None = None,
+        extra_exclude_skeletons: set[str] | None = None,
     ) -> list[str]:
         expression = base.get("expression", "")
         if not expression:
@@ -254,14 +255,15 @@ class RefineAlphaGenerator:
         # 去掉跟 base 完全相同的（regex 友好的简单 dedup）
         base_norm = re.sub(r"\s+", "", expression)
         deduped = [e for e in cleaned if re.sub(r"\s+", "", e) != base_norm]
-        # 兜底过滤：骨架命中 submitted 的也丢——WQ 上已经存在，回测纯浪费
-        if submitted_skeletons:
+        # 兜底过滤：骨架命中"已存在/已知低分"集合的也丢——WQ 上已存在或已知差，回测纯浪费
+        exclude = set(submitted_skeletons or ()) | set(extra_exclude_skeletons or ())
+        if exclude:
             from .. import db as _db_mod
             before = len(deduped)
-            deduped = [e for e in deduped if _db_mod.expression_skeleton(e) not in submitted_skeletons]
+            deduped = [e for e in deduped if _db_mod.expression_skeleton(e) not in exclude]
             if before != len(deduped):
                 logger.info(
-                    f"Dropped {before - len(deduped)} variants matching submitted-alpha skeleton"
+                    f"Dropped {before - len(deduped)} variants matching existing/known-low skeleton"
                 )
         logger.info(
             f"Refine produced {len(deduped)} variants from {len(raw)} raw "

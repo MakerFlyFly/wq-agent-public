@@ -44,6 +44,8 @@ cp .env.example .env
 | `WQ_REGION` / `WQ_UNIVERSE` / `WQ_DELAY` / `WQ_NEUTRALIZATION` | 回测参数 |
 | `MIN_FITNESS` / `MIN_SHARPE` / `MAX_TURNOVER` / `MIN_RETURNS` | 评级阈值 |
 | `WQ_MAX_CONCURRENT` | Simulation 并发数 |
+| `LLM_GEN_TEMPERATURE` | 主生成采样温度（默认 0.5，调高增大多样性减少重复） |
+| `DEDUP_FITNESS_FLOOR` | 同骨架历史最佳 fitness 始终低于此值则从生成里排除（默认 0.3，0 关闭） |
 
 ## 使用
 
@@ -65,7 +67,22 @@ wq-agent list --quality high --min-fitness 0.6
 
 # 统计概览
 wq-agent status
+
+# 重复度报告：按 wrapper 家族（outer-2）看库里结构集中度
+wq-agent diversity
 ```
+
+### 减少 alpha 重复性
+
+生成侧有多道去重，越往后越细：
+
+1. **批内去重** — 同一次生成里同骨架（仅换字段/窗口）的表达式只保留第一个
+2. **历史低分骨架排除**（`DEDUP_FITNESS_FLOOR`）— 同骨架历史最佳 fitness 始终低于阈值的结构不再重测
+3. **已提交 / self_correlation FAIL 骨架黑名单** — 注入 prompt 并二次过滤
+4. **Exemplar 三级多样化** — 防止高 fitness 模板单一栽培（同 wrapper 霸屏）
+5. **`LLM_GEN_TEMPERATURE`** — 调高采样温度直接增大结构/字段多样性
+
+用 `wq-agent diversity` 观察 wrapper 家族集中度：`family/alpha ratio` 越低说明结构越单一。
 
 加 `-v / --verbose` 输出 DEBUG 级日志，日志同时写入 `wq_agent.log`。
 

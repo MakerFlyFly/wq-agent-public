@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "kimi"
     LLM_MODEL: str = ""
     LLM_MAX_TOKENS: int = 32768
+    # 主生成的采样温度。偏低（0.3）易产出同质表达式；调高增大结构/字段多样性，
+    # 是最便宜的"减重复"旋钮。refine 另用更高温度（0.55）做变体探索。
+    LLM_GEN_TEMPERATURE: float = 0.5
     KIMI_API_KEY: str = ""
     KIMI_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
     KIMI_MODEL: str = "kimi-k2.6"
@@ -31,6 +34,10 @@ class Settings(BaseSettings):
     MIN_TURNOVER: float = 0.01
     MAX_TURNOVER: float = 0.70
     MIN_RETURNS: float = 0.05  # WQ 不卡，保留作为可选偏好
+
+    # 生成去重：历史已回测且同骨架最佳 fitness 始终低于该值的结构，从新一批生成里排除，
+    # 避免反复重测已知低分结构。设为 0 关闭该过滤。
+    DEDUP_FITNESS_FLOOR: float = 0.3
 
     DB_PATH: str = "./wq_agent.db"
 
