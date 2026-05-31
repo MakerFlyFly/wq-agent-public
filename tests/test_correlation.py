@@ -89,3 +89,41 @@ def test_align_by_date_overlap():
     va, vb = align(a_d, a_r, b_d, b_r)
     assert va == [2.0, 3.0]   # only d2, d3 overlap, sorted by date
     assert vb == [9.0, 8.0]
+
+
+from wq_agent.engine.correlation import max_correlation, is_hard_redundant
+
+
+def test_max_correlation_picks_strongest_with_enough_overlap():
+    cand_d = ["d1", "d2", "d3", "d4"]
+    cand_r = [1.0, 2.0, 3.0, 4.0]
+    refs = [
+        {"alpha_id": 10, "sharpe": 1.5, "dates": ["d1", "d2", "d3", "d4"], "returns": [4, 3, 2, 1]},  # corr -1
+        {"alpha_id": 11, "sharpe": 1.6, "dates": ["d1", "d2", "d3", "d4"], "returns": [1, 2, 3, 4]},  # corr +1
+        {"alpha_id": 12, "sharpe": 9.9, "dates": ["dX"], "returns": [1.0]},                            # no overlap
+    ]
+    corr, ref_id, ref_sharpe = max_correlation(cand_d, cand_r, refs, min_overlap=3)
+    assert ref_id == 11
+    assert corr == pytest.approx(1.0)
+    assert ref_sharpe == 1.6
+
+
+def test_max_correlation_skips_insufficient_overlap():
+    refs = [{"alpha_id": 10, "sharpe": 1.5, "dates": ["d1", "d2"], "returns": [1, 2]}]
+    corr, ref_id, ref_sharpe = max_correlation(["d1", "d2"], [1, 2], refs, min_overlap=3)
+    assert ref_id is None and corr == 0.0 and ref_sharpe is None
+
+
+def test_is_hard_redundant_rule():
+    # corr above threshold AND sharpe not >10% better -> redundant
+    assert is_hard_redundant(cand_sharpe=1.30, max_corr=0.93, ref_sharpe=1.40,
+                             threshold=0.7, margin=0.10) is True
+    # corr above threshold BUT sharpe >10% better -> NOT redundant (WQ accepts)
+    assert is_hard_redundant(cand_sharpe=1.60, max_corr=0.93, ref_sharpe=1.40,
+                             threshold=0.7, margin=0.10) is False
+    # corr below threshold -> NOT redundant
+    assert is_hard_redundant(cand_sharpe=1.30, max_corr=0.50, ref_sharpe=1.40,
+                             threshold=0.7, margin=0.10) is False
+    # no ref -> NOT redundant
+    assert is_hard_redundant(cand_sharpe=1.30, max_corr=0.0, ref_sharpe=None,
+                             threshold=0.7, margin=0.10) is False

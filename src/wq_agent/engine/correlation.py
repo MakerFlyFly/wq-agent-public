@@ -52,3 +52,41 @@ def align(
     mb = dict(zip(dates_b, rb))
     common = sorted(set(ma) & set(mb))
     return [ma[d] for d in common], [mb[d] for d in common]
+
+
+def max_correlation(
+    cand_dates: list[str], cand_returns: list[float],
+    refs: list[dict], min_overlap: int,
+) -> tuple[float, int | None, float | None]:
+    """候选对参考集求最大 |相关|（重叠 < min_overlap 的 ref 跳过）。
+
+    refs 每项需含 alpha_id / sharpe / dates / returns。
+    返回 (max_corr, ref_alpha_id, ref_sharpe)；无可比 ref → (0.0, None, None)。
+    """
+    best_corr = 0.0
+    best_id: int | None = None
+    best_sharpe: float | None = None
+    for ref in refs:
+        va, vb = align(cand_dates, cand_returns, ref.get("dates", []), ref.get("returns", []))
+        if len(va) < min_overlap:
+            continue
+        corr = pearson(va, vb)
+        if abs(corr) > abs(best_corr) or (abs(corr) == abs(best_corr) and corr > best_corr):
+            best_corr, best_id, best_sharpe = corr, ref["alpha_id"], ref.get("sharpe")
+    return best_corr, best_id, best_sharpe
+
+
+def is_hard_redundant(
+    cand_sharpe: float | None, max_corr: float, ref_sharpe: float | None,
+    threshold: float, margin: float,
+) -> bool:
+    """硬 gate：|相关| > threshold 且 候选 sharpe 没比命中的 ref 高 margin → 判重。
+
+    镜像 WQ：高相关但 sharpe 明显更好（≥ margin）的不算重复（WQ 视为升级版）。
+    缺 ref 或缺 sharpe → 不判重（fail-open）。
+    """
+    if ref_sharpe is None or abs(max_corr) <= threshold:
+        return False
+    if cand_sharpe is None:
+        return True  # 相关超阈值又拿不到候选 sharpe → 保守判重
+    return cand_sharpe < (1.0 + margin) * ref_sharpe
