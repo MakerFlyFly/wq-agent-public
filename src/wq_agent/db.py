@@ -143,6 +143,14 @@ CREATE TABLE IF NOT EXISTS field_blacklist (
     last_reason TEXT,
     last_seen TIMESTAMP NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS alpha_pnl (
+    alpha_id INTEGER PRIMARY KEY REFERENCES alphas(id),
+    wq_alpha_id TEXT,
+    dates TEXT NOT NULL,
+    returns TEXT NOT NULL,
+    fetched_at TIMESTAMP NOT NULL
+);
 """
 
 
@@ -743,6 +751,35 @@ class Database:
         await self._conn.execute(
             "UPDATE backtest_results SET checks = ? WHERE alpha_id = ?",
             (checks_json, alpha_id),
+        )
+        await self._conn.commit()
+
+    async def get_cached_pnl(self, alpha_id: int) -> tuple[list[str], list[float]] | None:
+        """返回缓存的（日期, 每日收益）；未缓存返回 None。"""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            "SELECT dates, returns FROM alpha_pnl WHERE alpha_id = ?", (alpha_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return json.loads(row["dates"]), json.loads(row["returns"])
+
+    async def upsert_pnl(
+        self, alpha_id: int, wq_alpha_id: str | None,
+        dates: list[str], returns: list[float],
+    ) -> None:
+        assert self._conn is not None
+        await self._conn.execute(
+            """INSERT INTO alpha_pnl (alpha_id, wq_alpha_id, dates, returns, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(alpha_id) DO UPDATE SET
+                   wq_alpha_id=excluded.wq_alpha_id,
+                   dates=excluded.dates,
+                   returns=excluded.returns,
+                   fetched_at=excluded.fetched_at""",
+            (alpha_id, wq_alpha_id, json.dumps(dates), json.dumps(returns),
+             datetime.now().isoformat()),
         )
         await self._conn.commit()
 
