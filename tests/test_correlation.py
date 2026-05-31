@@ -1,9 +1,26 @@
 from __future__ import annotations
+
 from datetime import datetime
-from wq_agent.config import Settings
+
 import pytest
+
+from wq_agent.config import Settings
 from wq_agent.db import Database
-from wq_agent.models import AlphaRecord, BacktestResult, GenerationStrategy, AlphaStatus, QualityGrade
+from wq_agent.engine.correlation import (
+    CorrelationScreener,
+    align,
+    is_hard_redundant,
+    max_correlation,
+    parse_pnl_response,
+    pearson,
+)
+from wq_agent.models import (
+    AlphaRecord,
+    AlphaStatus,
+    BacktestResult,
+    GenerationStrategy,
+    QualityGrade,
+)
 
 
 def test_self_corr_settings_defaults():
@@ -56,9 +73,6 @@ async def test_list_reference_alphas(tmp_path):
         await db.close()
 
 
-from wq_agent.engine.correlation import parse_pnl_response
-
-
 def test_parse_pnl_response_diffs_to_daily_returns():
     data = {"records": [["2020-01-02", 0.0], ["2020-01-03", 1.5], ["2020-01-06", 1.0]]}
     dates, returns = parse_pnl_response(data)
@@ -71,9 +85,6 @@ def test_parse_pnl_response_skips_malformed():
     dates, returns = parse_pnl_response(data)
     assert dates == ["2020-01-06"]
     assert returns == [2.0]
-
-
-from wq_agent.engine.correlation import pearson, align
 
 
 def test_pearson_basic():
@@ -89,9 +100,6 @@ def test_align_by_date_overlap():
     va, vb = align(a_d, a_r, b_d, b_r)
     assert va == [2.0, 3.0]   # only d2, d3 overlap, sorted by date
     assert vb == [9.0, 8.0]
-
-
-from wq_agent.engine.correlation import max_correlation, is_hard_redundant
 
 
 def test_max_correlation_picks_strongest_with_enough_overlap():
@@ -127,10 +135,6 @@ def test_is_hard_redundant_rule():
     # no ref -> NOT redundant
     assert is_hard_redundant(cand_sharpe=1.30, max_corr=0.0, ref_sharpe=None,
                              threshold=0.7, margin=0.10) is False
-
-
-from wq_agent.engine.correlation import CorrelationScreener
-from wq_agent.config import Settings
 
 
 class _FakeWQ:
