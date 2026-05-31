@@ -71,3 +71,21 @@ def test_parse_pnl_response_skips_malformed():
     dates, returns = parse_pnl_response(data)
     assert dates == ["2020-01-06"]
     assert returns == [2.0]
+
+
+from wq_agent.engine.correlation import pearson, align
+
+
+def test_pearson_basic():
+    assert pearson([1, 2, 3, 4], [1, 2, 3, 4]) == pytest.approx(1.0)
+    assert pearson([1, 2, 3, 4], [4, 3, 2, 1]) == pytest.approx(-1.0)
+    assert pearson([1, 1, 1], [1, 2, 3]) == 0.0          # zero variance -> 0
+    assert pearson([1.0], [2.0]) == 0.0                  # too short -> 0
+
+
+def test_align_by_date_overlap():
+    a_d, a_r = ["d1", "d2", "d3"], [1.0, 2.0, 3.0]
+    b_d, b_r = ["d2", "d3", "d4"], [9.0, 8.0, 7.0]
+    va, vb = align(a_d, a_r, b_d, b_r)
+    assert va == [2.0, 3.0]   # only d2, d3 overlap, sorted by date
+    assert vb == [9.0, 8.0]
