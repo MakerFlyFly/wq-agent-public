@@ -58,6 +58,10 @@ wq-agent run --strategy llm --count 18 --batches 1
 # 仅生成（不回测）
 wq-agent generate --strategy template -n 20 --no-backtest
 
+# 用自然语言研究想法驱动 LLM 生成
+wq-agent generate --idea "分析师盈利上修叠加低换手约束，做行业中性 alpha" -n 20
+wq-agent run --idea-file ideas/analyst_revision.txt -n 20 -b 3
+
 # 对待回测的 alpha 跑回测
 wq-agent backtest --pending --concurrent 5
 wq-agent backtest --ids 1,2,3

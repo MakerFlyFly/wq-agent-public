@@ -189,6 +189,7 @@ reduce_sum(input) - 求和归约
 {forbidden_section}
 {submitted_skeletons_section}
 {family_saturation_section}
+{user_idea_section}
 {proven_wrappers_section}
 {exemplars_section}
 {knowledge_section}
@@ -353,6 +354,7 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
         submitted_skeletons: set[str] | None = None,
         extra_exclude_skeletons: set[str] | None = None,
         family_distribution: dict[str, Any] | None = None,
+        user_idea: str | None = None,
     ) -> list[str]:
         fields_str = [f"{f.id} ({f.description or 'No description'})" for f in data_fields]
         operators_by_cat: dict[str, list[str]] = {}
@@ -378,6 +380,8 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
 
         family_saturation_section = self._build_family_saturation_section(family_distribution)
 
+        user_idea_section = self._build_user_idea_section(user_idea)
+
         prompt = _ALPHA_PROMPT_TEMPLATE.format(
             count=count,
             fields="\n".join(fields_str),
@@ -385,6 +389,7 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
             forbidden_section=forbidden_section,
             submitted_skeletons_section=submitted_skeletons_section,
             family_saturation_section=family_saturation_section,
+            user_idea_section=user_idea_section,
             # 每批重新抽样 wrapper 样例，避免每次都把 LLM 往同几个外壳上推
             proven_wrappers_section=build_proven_wrappers_section(),
             exemplars_section=exemplars_section,
@@ -416,6 +421,21 @@ class LLMAlphaGenerator(BaseAlphaGenerator):
             logger.info(f"Intra-batch dedup: dropped {before - len(cleaned)} same-skeleton duplicates")
         logger.info(f"LLM generated {len(cleaned)} valid expressions from {len(raw_expressions)} raw")
         return cleaned
+
+    @staticmethod
+    def _build_user_idea_section(user_idea: str | None) -> str:
+        """把用户临时研究想法作为软约束注入 prompt。"""
+        if not user_idea or not user_idea.strip():
+            return ""
+        idea = user_idea.strip()
+        return (
+            "\n## 用户研究想法（本批优先围绕这个 thesis 生成）\n\n"
+            f"{idea}\n\n"
+            "请将这个自然语言想法转译成可回测的 WorldQuant Brain FastExpr：\n"
+            "- 优先选择与 thesis 语义匹配的字段、算子和时间窗口；\n"
+            "- 如果原始想法过宽，生成 2-3 个经济含义相近但结构不同的表达式族；\n"
+            "- 仍然严格遵守字段白名单、算子白名单、嵌套深度和去重规则。\n"
+        )
 
     @staticmethod
     def _dedup_by_skeleton(expressions: list[str]) -> list[str]:

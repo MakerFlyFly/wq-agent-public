@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,6 +13,8 @@ from wq_agent.models import (
     BacktestResult,
     GenerationStrategy,
     QualityGrade,
+    WQDataField,
+    WQOperator,
 )
 
 
@@ -102,3 +105,35 @@ def test_previous_section_aggregates_failure_modes():
     section = LLMAlphaGenerator._build_previous_results_section(rows)
     assert "复合" in section              # 推荐 add(rank(A), rank(B))
     assert "add(rank" in section
+
+
+@pytest.mark.asyncio
+async def test_user_idea_is_injected_into_llm_prompt():
+    captured = {}
+
+    async def _capture(prompt, **kw):
+        captured["prompt"] = prompt
+        return "rank(ts_delta(close, 20))"
+
+    llm = AsyncMock()
+    llm.generate = _capture
+    generator = LLMAlphaGenerator(llm)
+
+    expressions = await generator.generate(
+        [WQDataField(id="close", description="Close price")],
+        [WQOperator(name="rank", description="Cross-sectional rank"),
+         WQOperator(name="ts_delta", description="Time-series delta")],
+        count=1,
+        user_idea="分析师盈利上修叠加低换手约束，做行业中性 alpha",
+    )
+
+    prompt = captured["prompt"]
+    assert "用户研究想法" in prompt
+    assert "分析师盈利上修" in prompt
+    assert "转译成可回测" in prompt
+    assert expressions == ["rank(ts_delta(close, 20))"]
+
+
+def test_user_idea_section_empty_when_blank():
+    assert LLMAlphaGenerator._build_user_idea_section(None) == ""
+    assert LLMAlphaGenerator._build_user_idea_section("  ") == ""

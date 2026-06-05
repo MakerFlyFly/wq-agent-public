@@ -111,6 +111,7 @@ class Orchestrator:
         strategy: GenerationStrategy = GenerationStrategy.LLM,
         count: int = 18,
         auto_backtest: bool = True,
+        user_idea: str | None = None,
     ) -> list[AlphaRecord]:
         generator = self._generators.get(strategy)
         if not generator:
@@ -179,6 +180,9 @@ class Orchestrator:
                 f"(top: {tops})"
             )
 
+        if user_idea and user_idea.strip():
+            console.print("  Using [yellow]user research idea[/yellow] as generation guidance")
+
         console.print(f"\n[bold cyan]Generating {count} alphas using {strategy.value} strategy...[/bold cyan]")
         expressions = await generator.generate(
             data_fields, operators, previous_results=previous, count=count,
@@ -186,6 +190,7 @@ class Orchestrator:
             submitted_skeletons=submitted_skeletons,
             extra_exclude_skeletons=low_fit_skeletons,
             family_distribution=family_distribution,
+            user_idea=user_idea,
         )
         console.print(f"  Generated [green]{len(expressions)}[/green] valid expressions")
 

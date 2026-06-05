@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -30,10 +31,26 @@ def _setup_logging(verbose: bool = False) -> None:
     logger.add("wq_agent.log", level="DEBUG", rotation="10 MB")
 
 
+def _load_user_idea(idea: Optional[str], idea_file: Optional[Path]) -> str | None:
+    parts: list[str] = []
+    if idea and idea.strip():
+        parts.append(idea.strip())
+    if idea_file:
+        try:
+            text = idea_file.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise typer.BadParameter(f"Cannot read idea file {idea_file}: {exc}") from exc
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts) if parts else None
+
+
 @app.command()
 def generate(
     strategy: str = typer.Option("llm", "--strategy", "-s", help="Generation strategy: llm, template, factor_mining"),
     count: int = typer.Option(18, "--count", "-n", help="Number of alphas to generate"),
+    idea: Optional[str] = typer.Option(None, "--idea", help="Natural-language research idea to guide LLM generation"),
+    idea_file: Optional[Path] = typer.Option(None, "--idea-file", help="Read natural-language research idea from a UTF-8 text file"),
     no_backtest: bool = typer.Option(False, "--no-backtest", help="Skip auto-backtest"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
@@ -48,6 +65,7 @@ def generate(
                 strategy=GenerationStrategy(strategy),
                 count=count,
                 auto_backtest=not no_backtest,
+                user_idea=_load_user_idea(idea, idea_file),
             )
             console.print(f"\n[bold green]Generated {len(records)} alphas[/bold green]")
         except Exception as e:
@@ -181,6 +199,8 @@ def run(
     count: int = typer.Option(18, "--count", "-n", help="Alphas per batch"),
     batches: int = typer.Option(1, "--batches", "-b", help="Number of batches"),
     interval: int = typer.Option(60, "--interval", help="Seconds between batches"),
+    idea: Optional[str] = typer.Option(None, "--idea", help="Natural-language research idea to guide LLM generation"),
+    idea_file: Optional[Path] = typer.Option(None, "--idea-file", help="Read natural-language research idea from a UTF-8 text file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Full pipeline: generate → backtest → evaluate → display."""
@@ -191,9 +211,10 @@ def run(
         try:
             await orch.initialize()
             strat = GenerationStrategy(strategy)
+            user_idea = _load_user_idea(idea, idea_file)
             for batch_num in range(1, batches + 1):
                 console.print(f"\n[bold magenta]═══ Batch {batch_num}/{batches} ═══[/bold magenta]")
-                await orch.run(strategy=strat, count=count, auto_backtest=True)
+                await orch.run(strategy=strat, count=count, auto_backtest=True, user_idea=user_idea)
                 if batch_num < batches:
                     console.print(f"\n[dim]Waiting {interval}s before next batch...[/dim]")
                     await asyncio.sleep(interval)

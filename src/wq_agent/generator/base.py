@@ -19,5 +19,6 @@ class BaseAlphaGenerator(ABC):
         submitted_skeletons: set[str] | None = None,
         extra_exclude_skeletons: set[str] | None = None,
         family_distribution: dict[str, Any] | None = None,
+        user_idea: str | None = None,
     ) -> list[str]:
         ...
