@@ -125,25 +125,45 @@ async function loadConfig() {
 }
 
 function renderConfig(fields) {
-  const groups = new Map();
-  fields.forEach((field) => {
-    if (!groups.has(field.section)) {
-      groups.set(field.section, []);
+  const modelFields = fields.filter((field) => field.section === "模型");
+  const nonModelFields = fields.filter((field) => field.section !== "模型");
+  const groups = [
+    {
+      key: "model",
+      title: "通用模型参数",
+      meta: "LLM_PROVIDER / LLM_BASE_URL / LLM_MODEL",
+      fields: modelFields,
+    },
+  ];
+  nonModelFields.forEach((field) => {
+    let group = groups.find((item) => item.key === field.section);
+    if (!group) {
+      group = { key: field.section, title: field.section, meta: "", fields: [] };
+      groups.push(group);
     }
-    groups.get(field.section).push(field);
+    group.fields.push(field);
   });
 
-  $("configForm").innerHTML = "";
-  for (const [section, items] of groups) {
-    const sectionEl = document.createElement("section");
-    sectionEl.className = "config-section";
-    sectionEl.innerHTML = `<h4>${escapeHtml(section)}</h4>`;
-    const fieldsEl = document.createElement("div");
-    fieldsEl.className = "config-fields";
-    items.forEach((field) => fieldsEl.appendChild(configField(field)));
-    sectionEl.appendChild(fieldsEl);
-    $("configForm").appendChild(sectionEl);
-  }
+  const form = $("configForm");
+  form.innerHTML = "";
+  groups
+    .filter((group) => group.fields.length)
+    .forEach((group) => {
+      const sectionEl = document.createElement("section");
+      sectionEl.className = `config-section config-section-${cssToken(group.key)}`;
+      const headEl = document.createElement("div");
+      headEl.className = "config-section-head";
+      headEl.innerHTML = `
+        <h4>${escapeHtml(group.title)}</h4>
+        ${group.meta ? `<span>${escapeHtml(group.meta)}</span>` : ""}
+      `;
+      const fieldsEl = document.createElement("div");
+      fieldsEl.className = "config-fields";
+      group.fields.forEach((field) => fieldsEl.appendChild(configField(field)));
+      sectionEl.appendChild(headEl);
+      sectionEl.appendChild(fieldsEl);
+      form.appendChild(sectionEl);
+    });
 }
 
 function configField(field) {
@@ -288,6 +308,10 @@ async function saveConfig() {
   } catch (error) {
     toast(error.message);
   }
+}
+
+function cssToken(value) {
+  return String(value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "group";
 }
 
 function renderConfigStatus(fields) {

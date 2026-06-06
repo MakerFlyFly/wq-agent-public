@@ -79,8 +79,6 @@ class ConfigField:
     kind: str = "text"
     options: tuple[str, ...] = ()
     allow_custom: bool = False
-    provider: str | None = None
-    ui_hidden: bool = False
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -157,8 +155,6 @@ class EnvManager:
                     "kind": field_def.kind,
                     "options": list(field_def.options),
                     "allow_custom": field_def.allow_custom,
-                    "provider": field_def.provider,
-                    "ui_hidden": field_def.ui_hidden,
                     "secret": field_def.secret,
                     "has_value": has_value,
                     "value": value,
