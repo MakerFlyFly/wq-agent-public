@@ -113,8 +113,10 @@ wq-agent gui --host 127.0.0.1 --port 8765 --open-browser
 GUI 会打开本地网页控制台，支持：
 
 - 编辑 `.env` 中的 OpenAI-compatible API、WQ Brain、回测和本地数据库配置；
+- 按当前 LLM 供应商只展示相关 API / 模型字段，降低误改其他供应商配置的概率；
 - 运行 `generate` / `run` / `backtest` / `refine`；
 - 查看任务日志、状态统计、最近 alpha 和可提交候选；
+- 浏览公开 `wiki/` 与私有 `private_wiki/` Markdown，并上传 MD / TXT / PDF / DOCX 到私有知识库；
 - 一次只运行一个长任务，避免并发误操作。
 
 安全边界：
@@ -123,6 +125,8 @@ GUI 会打开本地网页控制台，支持：
 - GUI 不提供 `submit` / `sync-submitted` 按钮；
 - `.env` 不存在时会从 `.env.example` 初始化，真实密钥仍由 `.gitignore` 保护，不会提交到 git；
 - 密钥字段默认隐藏，留空或保持遮罩时不会覆盖原值。
+- 知识库上传服务端只写入私有 `private_wiki/uploads/`，并要求 wiki 根目录位于当前 workspace 内；
+- 单文件上传上限为 25MB，PDF / DOCX 会被转成 Markdown，并带有页数、表格单元格和提取文本长度保护。
 
 ### 减少 alpha 重复性
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from email import policy
+from email.parser import BytesParser
 import json
 import os
 import re
@@ -17,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import dotenv_values
 
@@ -25,6 +27,13 @@ from ..config import Settings
 from ..db import Database
 from ..llm.factory import GLOBAL_MODEL_OPTIONS
 from ..llm.security import is_real_secret
+from .wiki_files import (
+    MAX_UPLOAD_BYTES,
+    UploadedFile,
+    build_wiki_tree,
+    import_uploaded_files,
+    read_wiki_file,
+)
 
 
 MASKED_SECRET = "********"
@@ -71,6 +80,8 @@ class ConfigField:
     kind: str = "text"
     options: tuple[str, ...] = ()
     allow_custom: bool = False
+    provider: str | None = None
+    ui_hidden: bool = False
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -82,6 +93,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         kind="select",
         options=(
             "",
+            "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
             "gpt-5.3-codex",
@@ -89,38 +101,49 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
             "deepseek-chat",
             "deepseek-reasoner",
         ),
+        ui_hidden=True,
     ),
     ConfigField("LLM_MAX_TOKENS", "最大输出 Token", "模型", kind="number"),
-    ConfigField("OPENAI_BASE_URL", "OpenAI API 地址", "模型"),
-    ConfigField("OPENAI_API_KEY", "OpenAI API 密钥", "模型", secret=True, kind="password"),
+    ConfigField("OPENAI_BASE_URL", "OpenAI API 地址", "模型", provider="openai"),
+    ConfigField("OPENAI_API_KEY", "OpenAI API 密钥", "模型", secret=True, kind="password", provider="openai"),
     ConfigField(
         "OPENAI_MODEL",
         "OpenAI 默认模型",
         "模型",
         kind="select",
-        options=("", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"),
+        options=("", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"),
         allow_custom=True,
+        provider="openai",
     ),
-    ConfigField("OPENAI_WIRE_API", "回复模式", "模型", kind="select", options=("auto", "responses", "chat_completions")),
+    ConfigField(
+        "OPENAI_WIRE_API",
+        "回复模式",
+        "模型",
+        kind="select",
+        options=("auto", "responses", "chat_completions"),
+        provider="openai",
+    ),
     ConfigField(
         "OPENAI_REASONING_EFFORT",
         "Reasoning Effort",
         "模型",
         kind="select",
         options=("", "none", "minimal", "low", "medium", "high", "xhigh"),
+        provider="openai",
     ),
-    ConfigField("OPENAI_STORE", "响应存储", "模型", kind="boolean"),
-    ConfigField("OPENAI_ALLOW_INSECURE_HTTP", "允许远程 HTTP", "模型", kind="boolean"),
+    ConfigField("OPENAI_STORE", "响应存储", "模型", kind="boolean", provider="openai"),
+    ConfigField("OPENAI_ALLOW_INSECURE_HTTP", "允许远程 HTTP", "模型", kind="boolean", provider="openai"),
     ConfigField(
         "OPENAI_CHAT_TOKEN_PARAM",
         "Chat Token 参数",
         "模型",
         kind="select",
         options=("max_tokens", "max_completion_tokens"),
+        provider="openai",
     ),
-    ConfigField("OPENAI_CHAT_REASONING_EFFORT", "Chat Reasoning 参数", "模型", kind="boolean"),
-    ConfigField("KIMI_API_KEY", "Kimi API 密钥", "模型", secret=True, kind="password"),
-    ConfigField("KIMI_BASE_URL", "Kimi API 地址", "模型"),
+    ConfigField("OPENAI_CHAT_REASONING_EFFORT", "Chat Reasoning 参数", "模型", kind="boolean", provider="openai"),
+    ConfigField("KIMI_API_KEY", "Kimi API 密钥", "模型", secret=True, kind="password", provider="kimi"),
+    ConfigField("KIMI_BASE_URL", "Kimi API 地址", "模型", provider="kimi"),
     ConfigField(
         "KIMI_MODEL",
         "Kimi 默认模型",
@@ -128,9 +151,10 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         kind="select",
         options=("", "kimi-k2.6"),
         allow_custom=True,
+        provider="kimi",
     ),
-    ConfigField("DEEPSEEK_API_KEY", "DeepSeek API 密钥", "模型", secret=True, kind="password"),
-    ConfigField("DEEPSEEK_BASE_URL", "DeepSeek API 地址", "模型"),
+    ConfigField("DEEPSEEK_API_KEY", "DeepSeek API 密钥", "模型", secret=True, kind="password", provider="deepseek"),
+    ConfigField("DEEPSEEK_BASE_URL", "DeepSeek API 地址", "模型", provider="deepseek"),
     ConfigField(
         "DEEPSEEK_MODEL",
         "DeepSeek 默认模型",
@@ -138,6 +162,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         kind="select",
         options=("", "deepseek-chat", "deepseek-reasoner"),
         allow_custom=True,
+        provider="deepseek",
     ),
     ConfigField("WQ_USERNAME", "WQ 用户名", "WorldQuant"),
     ConfigField("WQ_PASSWORD", "WQ 密码", "WorldQuant", secret=True, kind="password"),
@@ -182,6 +207,8 @@ class EnvManager:
                     "kind": field_def.kind,
                     "options": list(field_def.options),
                     "allow_custom": field_def.allow_custom,
+                    "provider": field_def.provider,
+                    "ui_hidden": field_def.ui_hidden,
                     "secret": field_def.secret,
                     "has_value": has_value,
                     "value": value,
@@ -215,7 +242,9 @@ class EnvManager:
             raw_normalized[key] = text
             normalized[key] = self._quote_value(text)
 
-        _validate_config_updates(self._read_values(), raw_normalized)
+        current_values = self._read_values()
+        _clear_incompatible_legacy_model(current_values, raw_normalized, normalized)
+        _validate_config_updates(current_values, raw_normalized)
 
         updated_lines: list[str] = []
         for line in lines:
@@ -530,6 +559,13 @@ def _make_handler(state: GuiState):
                     self._send_json(_load_results(state.root))
                 elif self.path == "/api/job":
                     self._send_json(state.jobs.snapshot())
+                elif self.path == "/api/wiki/tree":
+                    self._send_json(build_wiki_tree(state.root))
+                elif self.path.startswith("/api/wiki/file"):
+                    params = parse_qs(urlparse(self.path).query)
+                    root_key = (params.get("root") or [""])[0]
+                    rel_path = (params.get("path") or [""])[0]
+                    self._send_json(read_wiki_file(state.root, root_key, rel_path))
                 else:
                     self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             except ValueError as exc:
@@ -539,17 +575,25 @@ def _make_handler(state: GuiState):
 
         def do_POST(self) -> None:
             try:
-                self._validate_write_request()
-                payload = self._read_json()
+                self._validate_write_request(
+                    allow_multipart=self.path == "/api/wiki/upload"
+                )
                 if self.path == "/api/config":
+                    payload = self._read_json()
                     self._send_json(state.env.save(payload.get("values", payload)))
                 elif self.path == "/api/run":
+                    payload = self._read_json()
                     action = str(payload.get("action", "")).strip()
                     cli_args = build_cli_command(action, payload)
                     job = state.jobs.start(action, cli_args)
                     self._send_json({"job": job.snapshot(state.env.secret_values())})
                 elif self.path == "/api/job/cancel":
                     self._send_json(state.jobs.cancel())
+                elif self.path == "/api/wiki/upload":
+                    root_key, files = self._read_multipart_upload()
+                    if root_key != "private":
+                        raise ValueError("Uploads are only allowed to the private wiki")
+                    self._send_json(import_uploaded_files(state.root, files, root_key="private"))
                 else:
                     self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             except ValueError as exc:
@@ -566,14 +610,51 @@ def _make_handler(state: GuiState):
             data = self.rfile.read(length)
             return json.loads(data.decode("utf-8"))
 
-        def _validate_write_request(self) -> None:
+        def _validate_write_request(self, *, allow_multipart: bool = False) -> None:
             self._validate_host_and_origin()
             content_type = self.headers.get("Content-Type", "")
-            if "application/json" not in content_type.lower():
-                raise ValueError("POST requests must use application/json")
+            lower_type = content_type.lower()
+            valid_type = "application/json" in lower_type or (
+                allow_multipart and "multipart/form-data" in lower_type
+            )
+            if not valid_type:
+                expected = (
+                    "application/json or multipart/form-data"
+                    if allow_multipart
+                    else "application/json"
+                )
+                raise ValueError(f"POST requests must use {expected}")
             token = self.headers.get("X-WQ-Agent-CSRF", "")
             if token != state.csrf_token:
                 raise ValueError("Invalid CSRF token")
+
+        def _read_multipart_upload(self) -> tuple[str, list[UploadedFile]]:
+            content_type = self.headers.get("Content-Type", "")
+            lower_type = content_type.lower()
+            if "multipart/form-data" not in lower_type or "boundary=" not in lower_type:
+                raise ValueError("Upload requests must use multipart/form-data with a boundary")
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0:
+                raise ValueError("Upload body is empty")
+            if length > MAX_UPLOAD_BYTES * 4:
+                raise ValueError("Upload body is too large")
+            body = self.rfile.read(length)
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + body
+            )
+            if not message.is_multipart():
+                raise ValueError("Upload body is not valid multipart/form-data")
+            root_key = "private"
+            files: list[UploadedFile] = []
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                filename = part.get_filename()
+                if name == "root" and not filename:
+                    root_key = (part.get_content() or "private").strip() or "private"
+                elif name == "files" and filename:
+                    payload = part.get_payload(decode=True) or b""
+                    files.append(UploadedFile(filename=filename, content=payload))
+            return root_key, files
 
         def _validate_read_request(self, *, allow_missing_token: bool = False) -> None:
             self._validate_host_and_origin()
@@ -744,11 +825,31 @@ def _validate_config_value(field_def: ConfigField, text: str) -> str:
     return text
 
 
+def _clear_incompatible_legacy_model(
+    current_values: dict[str, str],
+    raw_updates: dict[str, str],
+    quoted_updates: dict[str, str],
+) -> None:
+    if "LLM_MODEL" in raw_updates:
+        return
+    values = {**current_values, **raw_updates}
+    provider = (values.get("LLM_PROVIDER") or _settings_default("LLM_PROVIDER")).strip().lower()
+    model = (values.get("LLM_MODEL") or "").strip()
+    if not model or provider == "openai":
+        return
+    allowed = GLOBAL_MODEL_OPTIONS.get(provider)
+    if allowed and model not in allowed:
+        raw_updates["LLM_MODEL"] = ""
+        quoted_updates["LLM_MODEL"] = ""
+
+
 def _validate_config_updates(current_values: dict[str, str], updates: dict[str, str]) -> None:
     values = {**current_values, **updates}
     provider = (values.get("LLM_PROVIDER") or _settings_default("LLM_PROVIDER")).strip().lower()
     model = (values.get("LLM_MODEL") or "").strip()
     if not model:
+        return
+    if provider == "openai":
         return
     allowed = GLOBAL_MODEL_OPTIONS.get(provider)
     if allowed and model not in allowed:

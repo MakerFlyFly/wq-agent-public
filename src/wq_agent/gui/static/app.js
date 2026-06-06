@@ -3,12 +3,24 @@ const state = {
   currentTab: "run",
   pollTimer: null,
   csrfToken: "",
+  wikiTree: null,
+  wikiUploading: false,
 };
 const CLEAR_SECRET_VALUE = "__clear_secret__";
 const GLOBAL_MODEL_OPTIONS = {
-  openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
   kimi: ["kimi-k2.6"],
   deepseek: ["deepseek-chat", "deepseek-reasoner"],
+};
+const PROVIDER_MODEL_KEYS = {
+  openai: "OPENAI_MODEL",
+  kimi: "KIMI_MODEL",
+  deepseek: "DEEPSEEK_MODEL",
+};
+const PROVIDER_SECRET_KEYS = {
+  openai: "OPENAI_API_KEY",
+  kimi: "KIMI_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,6 +42,9 @@ function bindTabs() {
       if (state.currentTab === "results") {
         refreshResults();
       }
+      if (state.currentTab === "wiki") {
+        refreshWiki();
+      }
     });
   });
 }
@@ -38,6 +53,8 @@ function bindActions() {
   $("btnSaveConfig").addEventListener("click", saveConfig);
   $("btnRefreshResults").addEventListener("click", refreshResults);
   $("btnCancelJob").addEventListener("click", cancelJob);
+  $("btnRefreshWiki").addEventListener("click", refreshWiki);
+  bindWikiUpload();
 
   $("btnGenerate").addEventListener("click", () => startTask("generate", {
     strategy: $("generateStrategy").value,
@@ -72,7 +89,11 @@ function bindActions() {
 }
 
 async function api(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const isFormData = options.body instanceof FormData;
+  const headers = { ...(options.headers || {}) };
+  if (!isFormData && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   if (state.csrfToken && path !== "/api/meta") {
     headers["X-WQ-Agent-CSRF"] = state.csrfToken;
   }
@@ -80,7 +101,13 @@ async function api(path, options = {}) {
     ...options,
     headers,
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text || "请求失败" };
+  }
   if (!response.ok) {
     throw new Error(data.error || "请求失败");
   }
@@ -114,8 +141,9 @@ async function loadConfig() {
 }
 
 function renderConfig(fields) {
+  const visibleFields = visibleConfigFields(fields);
   const groups = new Map();
-  fields.forEach((field) => {
+  visibleFields.forEach((field) => {
     if (!groups.has(field.section)) {
       groups.set(field.section, []);
     }
@@ -126,7 +154,7 @@ function renderConfig(fields) {
   for (const [section, items] of groups) {
     const sectionEl = document.createElement("section");
     sectionEl.className = "config-section";
-    sectionEl.innerHTML = `<h4>${escapeHtml(section)}</h4>`;
+    sectionEl.innerHTML = `<h4>${escapeHtml(configSectionTitle(section))}</h4>`;
     const fieldsEl = document.createElement("div");
     fieldsEl.className = "config-fields";
     items.forEach((field) => fieldsEl.appendChild(configField(field)));
@@ -135,9 +163,38 @@ function renderConfig(fields) {
   }
 }
 
+function visibleConfigFields(fields) {
+  const provider = currentProvider(fields);
+  return fields.filter((field) => {
+    if (field.ui_hidden) {
+      return false;
+    }
+    if (field.provider && field.provider !== provider) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function currentProvider(fields = state.configFields) {
+  const provider = fields.find((field) => field.key === "LLM_PROVIDER")?.value || "openai";
+  return String(provider).toLowerCase();
+}
+
+function configSectionTitle(section) {
+  if (section !== "模型") {
+    return section;
+  }
+  const labels = { openai: "模型 / OpenAI", kimi: "模型 / Kimi", deepseek: "模型 / DeepSeek" };
+  return labels[currentProvider()] || "模型";
+}
+
 function configField(field) {
   const label = document.createElement("label");
   label.className = "config-field";
+  if (field.provider) {
+    label.dataset.provider = field.provider;
+  }
   const labelText = document.createElement("span");
   labelText.className = "config-label";
   labelText.textContent = field.label;
@@ -148,7 +205,7 @@ function configField(field) {
     input.type = "checkbox";
     input.dataset.configKey = field.key;
     input.checked = String(field.value).toLowerCase() === "true";
-    input.addEventListener("change", refreshConfigStatusFromForm);
+    input.addEventListener("change", handleConfigInputChange);
     const switchEl = document.createElement("span");
     switchEl.className = "switch";
     switchEl.setAttribute("aria-hidden", "true");
@@ -158,28 +215,9 @@ function configField(field) {
     return label;
   }
 
-  const input = field.kind === "select" ? document.createElement("select") : document.createElement("input");
+  const { input, datalist } = createConfigInput(field);
   input.dataset.configKey = field.key;
-  input.addEventListener(field.kind === "select" ? "change" : "input", refreshConfigStatusFromForm);
-
-  if (field.kind === "select") {
-    const options = Array.isArray(field.options) ? [...field.options] : [];
-    const current = field.value || "";
-    if (current && !options.includes(current)) {
-      options.push(current);
-    }
-    options.forEach((option) => {
-      const optionEl = document.createElement("option");
-      optionEl.value = option;
-      optionEl.textContent = option || "使用供应商默认";
-      input.appendChild(optionEl);
-    });
-    input.value = current;
-  } else {
-    input.value = field.secret ? "" : field.value || "";
-    input.placeholder = field.secret && field.has_value ? "已设置，留空保持不变" : "";
-    input.type = field.secret ? "password" : field.kind === "number" ? "number" : "text";
-  }
+  input.addEventListener(input.tagName === "SELECT" ? "change" : "input", handleConfigInputChange);
 
   label.appendChild(labelText);
 
@@ -213,8 +251,62 @@ function configField(field) {
   } else {
     label.appendChild(input);
   }
+  if (datalist) {
+    label.appendChild(datalist);
+  }
 
   return label;
+}
+
+function createConfigInput(field) {
+  if (field.kind === "select" && !field.allow_custom) {
+    const select = document.createElement("select");
+    const options = Array.isArray(field.options) ? [...field.options] : [];
+    const current = field.value || "";
+    if (current && !options.includes(current)) {
+      options.push(current);
+    }
+    options.forEach((option) => {
+      const optionEl = document.createElement("option");
+      optionEl.value = option;
+      optionEl.textContent = option || "使用供应商默认";
+      select.appendChild(optionEl);
+    });
+    select.value = current;
+    return { input: select, datalist: null };
+  }
+
+  const input = document.createElement("input");
+  input.value = field.secret ? "" : field.value || "";
+  input.placeholder = field.secret && field.has_value ? "已设置，留空保持不变" : "";
+  input.type = field.secret ? "password" : field.kind === "number" ? "number" : "text";
+  let datalist = null;
+  if (field.kind === "select" && field.allow_custom) {
+    const listId = `options-${field.key}`;
+    input.setAttribute("list", listId);
+    input.placeholder = field.value ? "" : "可输入任意模型名";
+    datalist = document.createElement("datalist");
+    datalist.id = listId;
+    (field.options || []).forEach((option) => {
+      if (!option) {
+        return;
+      }
+      const optionEl = document.createElement("option");
+      optionEl.value = option;
+      datalist.appendChild(optionEl);
+    });
+  }
+  return { input, datalist };
+}
+
+function handleConfigInputChange(event) {
+  if (event.target.dataset.configKey === "LLM_PROVIDER") {
+    state.configFields = currentConfigFieldsFromForm();
+    renderConfig(state.configFields);
+    renderConfigStatus(state.configFields);
+    return;
+  }
+  refreshConfigStatusFromForm();
 }
 
 async function saveConfig() {
@@ -246,17 +338,16 @@ async function saveConfig() {
 
 function renderConfigStatus(fields) {
   const byKey = Object.fromEntries(fields.map((field) => [field.key, field]));
-  const provider = String(byKey.LLM_PROVIDER?.value || "openai").toLowerCase();
-  const providerKey = {
-    openai: "OPENAI_API_KEY",
-    kimi: "KIMI_API_KEY",
-    deepseek: "DEEPSEEK_API_KEY",
-  }[provider] || "OPENAI_API_KEY";
+  const provider = currentProvider(fields);
+  const providerKey = PROVIDER_SECRET_KEYS[provider] || "OPENAI_API_KEY";
   const globalModel = byKey.LLM_MODEL?.value || "";
-  const globalModelValid = !globalModel || (GLOBAL_MODEL_OPTIONS[provider] || []).includes(globalModel);
+  const globalModelValid = !globalModel
+    || provider === "openai"
+    || (GLOBAL_MODEL_OPTIONS[provider] || []).includes(globalModel);
+  const providerModelKey = PROVIDER_MODEL_KEYS[provider] || "OPENAI_MODEL";
   const model = globalModel
     ? (globalModelValid ? globalModel : "")
-    : byKey[`${provider.toUpperCase()}_MODEL`]?.value || byKey.OPENAI_MODEL?.value;
+    : byKey[providerModelKey]?.value || "";
   const checks = [
     ["模型供应商", Boolean(provider)],
     ["模型密钥", Boolean(byKey[providerKey]?.has_value)],
@@ -275,7 +366,11 @@ function refreshConfigStatusFromForm() {
   if (!state.configFields.length) {
     return;
   }
-  const liveFields = state.configFields.map((field) => {
+  renderConfigStatus(currentConfigFieldsFromForm());
+}
+
+function currentConfigFieldsFromForm() {
+  return state.configFields.map((field) => {
     const input = document.querySelector(`[data-config-key="${field.key}"]`);
     if (!input) {
       return field;
@@ -287,6 +382,9 @@ function refreshConfigStatusFromForm() {
         next.value = "";
       } else {
         next.has_value = Boolean(input.value) || Boolean(field.has_value);
+        if (input.value) {
+          next.value = input.value;
+        }
       }
     } else if (input.type === "checkbox") {
       next.value = String(input.checked);
@@ -295,7 +393,6 @@ function refreshConfigStatusFromForm() {
     }
     return next;
   });
-  renderConfigStatus(liveFields);
 }
 
 async function startTask(action, payload) {
@@ -433,6 +530,169 @@ function renderRecent(rows) {
   `).join("") : `<tr><td colspan="7">暂无 Alpha 记录。</td></tr>`;
 }
 
+async function refreshWiki() {
+  try {
+    const data = await api("/api/wiki/tree");
+    state.wikiTree = data;
+    renderWiki(data);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderWiki(data) {
+  const roots = data.roots || {};
+  const totalFiles = Object.values(roots).reduce((sum, root) => sum + (root.file_count || 0), 0);
+  $("wikiSummary").textContent = `共 ${totalFiles} 个 Markdown 文件`;
+  $("wikiRoots").innerHTML = "";
+  Object.values(roots).forEach((root) => {
+    $("wikiRoots").appendChild(renderWikiRoot(root));
+  });
+}
+
+function renderWikiRoot(root) {
+  const section = document.createElement("section");
+  section.className = "wiki-root";
+  section.innerHTML = `
+    <div class="wiki-root-head">
+      <div>
+        <strong>${escapeHtml(root.label)}</strong>
+        <span>${escapeHtml(root.path)}</span>
+      </div>
+      <em>${root.file_count || 0} 文件</em>
+    </div>
+  `;
+  const tree = document.createElement("div");
+  tree.className = "wiki-tree";
+  if (!root.exists || !root.tree || !root.tree.total_files) {
+    tree.innerHTML = `<p class="muted">暂无 Markdown 文件。</p>`;
+  } else {
+    tree.appendChild(renderWikiNode(root.key, root.tree, 0));
+  }
+  section.appendChild(tree);
+  return section;
+}
+
+function renderWikiNode(rootKey, node, level) {
+  if (node.type === "file") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wiki-file";
+    button.dataset.wikiPath = `${rootKey}:${node.path}`;
+    button.style.paddingLeft = `${12 + level * 14}px`;
+    button.innerHTML = `
+      <span>${escapeHtml(node.name)}</span>
+      <small>${formatBytes(node.size)}</small>
+    `;
+    button.addEventListener("click", () => loadWikiFile(rootKey, node.path));
+    return button;
+  }
+
+  const details = document.createElement("details");
+  details.className = "wiki-dir";
+  details.open = level < 1;
+  const summary = document.createElement("summary");
+  summary.style.paddingLeft = `${8 + level * 14}px`;
+  summary.innerHTML = `
+    <span>${escapeHtml(node.name || "root")}</span>
+    <small>${node.file_count || 0} / ${node.total_files || 0}</small>
+  `;
+  details.appendChild(summary);
+  (node.children || []).forEach((child) => {
+    details.appendChild(renderWikiNode(rootKey, child, level + 1));
+  });
+  return details;
+}
+
+async function loadWikiFile(rootKey, path) {
+  try {
+    const data = await api(
+      `/api/wiki/file?root=${encodeURIComponent(rootKey)}&path=${encodeURIComponent(path)}`
+    );
+    document.querySelectorAll(".wiki-file.active").forEach((item) => {
+      item.classList.remove("active");
+    });
+    const active = Array.from(document.querySelectorAll(".wiki-file")).find(
+      (item) => item.dataset.wikiPath === `${rootKey}:${path}`
+    );
+    if (active) {
+      active.classList.add("active");
+    }
+    $("wikiFileTitle").textContent = data.name;
+    $("wikiFileMeta").textContent = `${rootKey} / ${data.path} / ${formatBytes(data.size)} / ${data.modified_at}`;
+    $("wikiPreview").textContent = data.content || "文件为空。";
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function bindWikiUpload() {
+  const zone = $("wikiUploadZone");
+  const input = $("wikiUploadInput");
+  zone.addEventListener("click", (event) => {
+    if (!state.wikiUploading && event.target !== input) {
+      input.click();
+    }
+  });
+  input.addEventListener("change", () => {
+    uploadWikiFiles(input.files);
+    input.value = "";
+  });
+  ["dragenter", "dragover"].forEach((eventName) => {
+    zone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      zone.classList.add("dragging");
+    });
+  });
+  ["dragleave", "drop"].forEach((eventName) => {
+    zone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      zone.classList.remove("dragging");
+    });
+  });
+  zone.addEventListener("drop", (event) => {
+    uploadWikiFiles(event.dataTransfer.files);
+  });
+}
+
+async function uploadWikiFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) {
+    return;
+  }
+  if (state.wikiUploading) {
+    return;
+  }
+  const form = new FormData();
+  form.append("root", "private");
+  files.forEach((file) => form.append("files", file));
+  setWikiUploadState(true, `正在导入 ${files.length} 个文件...`);
+  try {
+    const data = await api("/api/wiki/upload", {
+      method: "POST",
+      body: form,
+    });
+    const count = data.uploaded?.length || 0;
+    toast(`已上传 ${count} 个文件`);
+    state.wikiTree = data.tree;
+    renderWiki(data.tree);
+    if (data.uploaded?.[0]?.path) {
+      loadWikiFile("private", data.uploaded[0].path);
+    }
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setWikiUploadState(false);
+  }
+}
+
+function setWikiUploadState(uploading, label = "Markdown / TXT / PDF / DOCX") {
+  state.wikiUploading = uploading;
+  $("wikiUploadZone").classList.toggle("uploading", uploading);
+  $("wikiUploadInput").disabled = uploading;
+  $("wikiUploadStatus").textContent = label;
+}
+
 function switchTab(tab) {
   const button = document.querySelector(`.nav-btn[data-tab="${tab}"]`);
   if (button) {
@@ -451,6 +711,17 @@ function fmt(value) {
     return "-";
   }
   return Number(value).toFixed(3);
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function toast(message) {

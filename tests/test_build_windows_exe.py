@@ -119,6 +119,23 @@ def test_distribution_privacy_assertion_accepts_required_public_bundle(tmp_path,
     build_windows_exe._assert_distribution_is_private_safe()
 
 
+def test_pyinstaller_command_includes_gui_upload_parser_hidden_imports(monkeypatch):
+    commands = []
+
+    def fake_run(command, cwd, check):
+        commands.append(command)
+
+    monkeypatch.setattr(build_windows_exe.subprocess, "run", fake_run)
+
+    build_windows_exe._run_pyinstaller()
+
+    command = commands[0]
+    assert command.count("--hidden-import") >= 3
+    assert "sqlite_vec" in command
+    assert "pypdf" in command
+    assert "docx" in command
+
+
 def teardown_module() -> None:
     if SCRIPT_PATH.parent.joinpath("__pycache__").exists():
         shutil.rmtree(SCRIPT_PATH.parent / "__pycache__", ignore_errors=True)
