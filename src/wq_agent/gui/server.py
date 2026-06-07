@@ -49,6 +49,9 @@ SECRET_KEYS = {
     "KIMI_API_KEY",
     "EMBEDDING_API_KEY",
 }
+API_SECRET_KEYS = {
+    "LLM_API_KEY",
+}
 NUMBER_MINIMUMS = {
     "LLM_MAX_TOKENS": 1,
     "WQ_DELAY": 0,
@@ -189,7 +192,9 @@ class EnvManager:
             raw_normalized[key] = text
             normalized[key] = self._quote_value(text)
 
-        _validate_config_updates(self._read_values(), raw_normalized)
+        current_values = self._read_values()
+        _validate_secret_updates_are_distinct(current_values, raw_normalized)
+        _validate_config_updates(current_values, raw_normalized)
 
         updated_lines: list[str] = []
         for line in lines:
@@ -773,6 +778,23 @@ def _validate_config_value(field_def: ConfigField, text: str) -> str:
         return str(value)
 
     return text
+
+
+def _validate_secret_updates_are_distinct(
+    current_values: dict[str, str], updates: dict[str, str]
+) -> None:
+    wq_password = updates.get("WQ_PASSWORD", current_values.get("WQ_PASSWORD", "")).strip()
+    if not is_real_secret(wq_password):
+        return
+    for key in API_SECRET_KEYS:
+        if key not in updates and "WQ_PASSWORD" not in updates:
+            continue
+        api_secret = updates.get(key, current_values.get(key, "")).strip()
+        if is_real_secret(api_secret) and api_secret == wq_password:
+            raise ValueError(
+                f"{key} 与 WQ_PASSWORD 的新值完全相同，疑似浏览器自动填充污染。"
+                "请分别点击对应字段的修改按钮后再保存。"
+            )
 
 
 def _validate_config_updates(current_values: dict[str, str], updates: dict[str, str]) -> None:

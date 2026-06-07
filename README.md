@@ -352,14 +352,14 @@ dist\wq-agent\wq-agent.exe backtest --pending
 dist\wq-agent\wq-agent.exe wiki stats
 ```
 
-冻结程序启动后会把工作目录切到 exe 所在目录，因此运行数据默认放在 `dist\wq-agent\` 里：
+冻结程序启动后会解析用户数据工作区。若 exe 位于 `<workspace>\dist\wq-agent\wq-agent.exe`，工作区会自动回到 `<workspace>`；也可以用环境变量 `WQ_AGENT_WORKSPACE` 显式指定。运行数据默认保留在工作区根目录，而不是发行目录：
 
 - `.env`
 - `wq_agent.db`
 - `wq_agent.log`
 - `private_wiki\`
 
-打包脚本只复制公开运行资源：`src\wq_agent\gui\static\`、`templates\`、`wiki\` 和 `.env.example`。真实 `.env`、数据库、日志、`private_wiki\`、`wiki\entries\`、`wiki\lessons\`、`.git\` 不会被打进发行目录。首次运行可复制或编辑 `.env.example` 生成自己的 `.env`。
+打包脚本只复制公开运行资源：`src\wq_agent\gui\static\`、`templates\`、`wiki\` 和 `.env.example`。真实 `.env`、数据库、日志、`private_wiki\`、`wiki\entries\`、`wiki\lessons\`、`.git\` 不会被打进发行目录。首次运行可在工作区根目录复制或编辑 `.env.example` 生成自己的 `.env`。
 
 ## 开源安全
 
