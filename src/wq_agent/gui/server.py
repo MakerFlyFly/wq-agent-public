@@ -27,6 +27,7 @@ from ..config import Settings
 from ..db import Database
 from ..llm.factory import GLOBAL_MODEL_OPTIONS
 from ..llm.security import is_real_secret
+from ..workspace import WORKSPACE_ENV_VAR, resolve_workspace
 from .wiki_files import (
     MAX_UPLOAD_BYTES,
     UploadedFile,
@@ -462,6 +463,7 @@ class JobManager:
         job.started_at = _now()
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
+        env[WORKSPACE_ENV_VAR] = str(self.root)
         env.setdefault("NO_COLOR", "1")
         try:
             process = subprocess.Popen(
@@ -514,11 +516,15 @@ class GuiState:
 def serve_gui(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     if host not in LOOPBACK_HOSTS:
         raise ValueError("GUI 只能绑定 127.0.0.1 / localhost")
-    state = GuiState(Path.cwd(), host=host, port=port)
+    workspace = resolve_workspace()
+    os.environ[WORKSPACE_ENV_VAR] = str(workspace)
+    os.chdir(workspace)
+    state = GuiState(workspace, host=host, port=port)
     handler = _make_handler(state)
     httpd = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}/"
     print(f"wq-agent GUI 已启动：{url}")
+    print(f"Workspace: {workspace}")
     print("按 Ctrl+C 停止。")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

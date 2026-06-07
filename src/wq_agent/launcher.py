@@ -8,6 +8,8 @@ from collections.abc import Callable, Sequence
 from ctypes import wintypes
 from pathlib import Path
 
+from wq_agent.workspace import configure_process_workspace
+
 
 InputFunc = Callable[[str], str]
 PrintFunc = Callable[..., None]
@@ -17,17 +19,9 @@ DEFAULT_RUN_COUNT = 18
 DEFAULT_RUN_BATCHES = 1
 
 
-def is_frozen() -> bool:
-    return bool(getattr(sys, "frozen", False))
-
-
 def configure_runtime_cwd() -> Path:
-    """In the frozen exe, keep runtime files beside wq-agent.exe."""
-    if is_frozen():
-        root = Path(sys.executable).resolve().parent
-        os.chdir(root)
-        return root
-    return Path.cwd()
+    """Configure the user-data workspace before dispatching launcher commands."""
+    return configure_process_workspace()
 
 
 def run_cli(args: list[str]) -> None:
@@ -159,6 +153,7 @@ def _print_menu(print_func: PrintFunc) -> None:
     print_func("")
     print_func("wq-agent 一键启动菜单")
     print_func("======================")
+    print_func(f"Workspace: {os.getcwd()}")
     print_func("1 启动 GUI")
     print_func("2 运行完整流程 run")
     print_func("3 回测待处理 backtest --pending")
