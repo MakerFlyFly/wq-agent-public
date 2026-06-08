@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from email import policy
+from email.parser import BytesParser
 import json
 import os
 import re
@@ -17,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import dotenv_values
 
@@ -25,6 +27,13 @@ from ..config import Settings
 from ..db import Database
 from ..llm.factory import PROTOCOL_PROVIDER_OPTIONS
 from ..llm.security import is_real_secret
+from .wiki_files import (
+    MAX_UPLOAD_BYTES,
+    UploadedFile,
+    build_wiki_tree,
+    import_uploaded_files,
+    read_wiki_file,
+)
 
 
 MASKED_SECRET = "********"
@@ -60,6 +69,8 @@ class ConfigField:
     kind: str = "text"
     options: tuple[str, ...] = ()
     allow_custom: bool = False
+    provider: str | None = None
+    ui_hidden: bool = False
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
@@ -136,6 +147,8 @@ class EnvManager:
                     "kind": field_def.kind,
                     "options": list(field_def.options),
                     "allow_custom": field_def.allow_custom,
+                    "provider": field_def.provider,
+                    "ui_hidden": field_def.ui_hidden,
                     "secret": field_def.secret,
                     "has_value": has_value,
                     "value": value,
@@ -484,6 +497,13 @@ def _make_handler(state: GuiState):
                     self._send_json(_load_results(state.root))
                 elif self.path == "/api/job":
                     self._send_json(state.jobs.snapshot())
+                elif self.path == "/api/wiki/tree":
+                    self._send_json(build_wiki_tree(state.root))
+                elif self.path.startswith("/api/wiki/file"):
+                    params = parse_qs(urlparse(self.path).query)
+                    root_key = (params.get("root") or [""])[0]
+                    rel_path = (params.get("path") or [""])[0]
+                    self._send_json(read_wiki_file(state.root, root_key, rel_path))
                 else:
                     self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             except ValueError as exc:
@@ -493,17 +513,25 @@ def _make_handler(state: GuiState):
 
         def do_POST(self) -> None:
             try:
-                self._validate_write_request()
-                payload = self._read_json()
+                self._validate_write_request(
+                    allow_multipart=self.path == "/api/wiki/upload"
+                )
                 if self.path == "/api/config":
+                    payload = self._read_json()
                     self._send_json(state.env.save(payload.get("values", payload)))
                 elif self.path == "/api/run":
+                    payload = self._read_json()
                     action = str(payload.get("action", "")).strip()
                     cli_args = build_cli_command(action, payload)
                     job = state.jobs.start(action, cli_args)
                     self._send_json({"job": job.snapshot(state.env.secret_values())})
                 elif self.path == "/api/job/cancel":
                     self._send_json(state.jobs.cancel())
+                elif self.path == "/api/wiki/upload":
+                    root_key, files = self._read_multipart_upload()
+                    if root_key != "private":
+                        raise ValueError("Uploads are only allowed to the private wiki")
+                    self._send_json(import_uploaded_files(state.root, files, root_key="private"))
                 else:
                     self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             except ValueError as exc:
@@ -520,14 +548,51 @@ def _make_handler(state: GuiState):
             data = self.rfile.read(length)
             return json.loads(data.decode("utf-8"))
 
-        def _validate_write_request(self) -> None:
+        def _validate_write_request(self, *, allow_multipart: bool = False) -> None:
             self._validate_host_and_origin()
             content_type = self.headers.get("Content-Type", "")
-            if "application/json" not in content_type.lower():
-                raise ValueError("POST requests must use application/json")
+            lower_type = content_type.lower()
+            valid_type = "application/json" in lower_type or (
+                allow_multipart and "multipart/form-data" in lower_type
+            )
+            if not valid_type:
+                expected = (
+                    "application/json or multipart/form-data"
+                    if allow_multipart
+                    else "application/json"
+                )
+                raise ValueError(f"POST requests must use {expected}")
             token = self.headers.get("X-WQ-Agent-CSRF", "")
             if token != state.csrf_token:
                 raise ValueError("Invalid CSRF token")
+
+        def _read_multipart_upload(self) -> tuple[str, list[UploadedFile]]:
+            content_type = self.headers.get("Content-Type", "")
+            lower_type = content_type.lower()
+            if "multipart/form-data" not in lower_type or "boundary=" not in lower_type:
+                raise ValueError("Upload requests must use multipart/form-data with a boundary")
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0:
+                raise ValueError("Upload body is empty")
+            if length > MAX_UPLOAD_BYTES * 4:
+                raise ValueError("Upload body is too large")
+            body = self.rfile.read(length)
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + body
+            )
+            if not message.is_multipart():
+                raise ValueError("Upload body is not valid multipart/form-data")
+            root_key = "private"
+            files: list[UploadedFile] = []
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                filename = part.get_filename()
+                if name == "root" and not filename:
+                    root_key = (part.get_content() or "private").strip() or "private"
+                elif name == "files" and filename:
+                    payload = part.get_payload(decode=True) or b""
+                    files.append(UploadedFile(filename=filename, content=payload))
+            return root_key, files
 
         def _validate_read_request(self, *, allow_missing_token: bool = False) -> None:
             self._validate_host_and_origin()

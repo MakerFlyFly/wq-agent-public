@@ -440,6 +440,195 @@ button:disabled {
   background: #fff5f5;
 }
 
+.wiki-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(520px, 1.1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.wiki-browser,
+.wiki-detail {
+  min-height: 680px;
+}
+
+.wiki-root-list {
+  display: grid;
+  gap: 18px;
+}
+
+.wiki-root {
+  min-width: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.wiki-root:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.wiki-root-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.wiki-root-head div {
+  min-width: 0;
+}
+
+.wiki-root-head strong,
+.wiki-root-head span {
+  display: block;
+}
+
+.wiki-root-head strong {
+  font-size: 14px;
+}
+
+.wiki-root-head span,
+.wiki-root-head em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.wiki-root-head span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-root-head em {
+  flex: 0 0 auto;
+}
+
+.wiki-tree {
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.wiki-tree .muted {
+  padding: 12px;
+}
+
+.wiki-dir summary,
+.wiki-file {
+  display: grid;
+  width: 100%;
+  min-height: 34px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid #e8efec;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+}
+
+.wiki-dir summary {
+  cursor: pointer;
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.wiki-dir summary::-webkit-details-marker {
+  color: var(--muted);
+}
+
+.wiki-file:hover,
+.wiki-file.active,
+.wiki-dir summary:hover {
+  background: var(--surface-soft);
+}
+
+.wiki-file.active {
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.wiki-file span,
+.wiki-dir summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-file small,
+.wiki-dir summary small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.upload-zone {
+  display: grid;
+  min-height: 118px;
+  place-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 18px;
+  border: 1px dashed #9fcabe;
+  border-radius: 8px;
+  background: #f7fbfa;
+  color: var(--accent-dark);
+  text-align: center;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.upload-zone input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.upload-zone strong {
+  font-size: 15px;
+}
+
+.upload-zone span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.upload-zone.dragging,
+.upload-zone:hover {
+  border-color: var(--accent);
+  background: #eef8f5;
+}
+
+.upload-zone.uploading {
+  cursor: wait;
+  border-style: solid;
+  background: #eef4f2;
+}
+
+.wiki-preview {
+  min-height: 470px;
+  max-height: 62vh;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfcfb;
+  color: #23302c;
+  font: 13px/1.55 Consolas, "Cascadia Mono", "Microsoft YaHei", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -569,9 +758,15 @@ td.expr {
   }
 
   .grid.two,
+  .wiki-layout,
   .config-fields,
   .metrics {
     grid-template-columns: 1fr;
+  }
+
+  .wiki-browser,
+  .wiki-detail {
+    min-height: 0;
   }
 
   .topbar {
