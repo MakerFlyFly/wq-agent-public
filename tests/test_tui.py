@@ -10,4 +10,4 @@ def test_tui_declares_core_bindings():
 
 def test_truncate_shortens_long_expressions():
     assert _truncate("rank(close)", 20) == "rank(close)"
-    assert _truncate("abcdefghijklmnopqrstuvwxyz", 8) == "abcdefg..."
+    assert _truncate("abcdefghijklmnopqrstuvwxyz", 8) == "abcde..."
