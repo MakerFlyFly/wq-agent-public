@@ -101,6 +101,10 @@ def _run_pyinstaller() -> None:
         str(PROJECT_ROOT / "src"),
         "--hidden-import",
         "sqlite_vec",
+        "--hidden-import",
+        "pypdf",
+        "--hidden-import",
+        "docx",
         "--collect-all",
         "sqlite_vec",
         "--add-data",
@@ -167,10 +171,16 @@ def _find_private_runtime_paths(root: Path) -> list[Path]:
     if not root.exists():
         return []
     violations: list[Path] = []
-    for path in root.iterdir():
-        if path.name in FORBIDDEN_NAMES:
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        parts = set(rel.parts)
+        if parts & FORBIDDEN_NAMES:
             violations.append(path)
-        elif path.is_file() and path.suffix.lower() in RUNTIME_PRIVATE_SUFFIXES:
+            continue
+        if path.is_file() and path.suffix.lower() in RUNTIME_PRIVATE_SUFFIXES:
+            violations.append(path)
+            continue
+        if rel.parts[:2] in {("wiki", "entries"), ("wiki", "lessons")}:
             violations.append(path)
     return sorted(violations)
 

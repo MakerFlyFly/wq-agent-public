@@ -50,6 +50,18 @@ def test_clean_previous_build_refuses_to_delete_runtime_private_files(tmp_path, 
     assert (app_dist / ".env").exists()
 
 
+def test_clean_previous_build_refuses_nested_private_files(tmp_path, monkeypatch):
+    app_dist = _patch_paths(monkeypatch, tmp_path)
+    nested = app_dist / "wiki" / "entries" / "private.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("secret research", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="Refusing to delete"):
+        build_windows_exe._clean_previous_build()
+
+    assert nested.exists()
+
+
 def test_clean_previous_build_removes_public_bundle_when_no_runtime_private_files(
     tmp_path, monkeypatch
 ):
@@ -117,6 +129,23 @@ def test_distribution_privacy_assertion_accepts_required_public_bundle(tmp_path,
     _create_required_distribution(app_dist)
 
     build_windows_exe._assert_distribution_is_private_safe()
+
+
+def test_pyinstaller_command_includes_gui_upload_parser_hidden_imports(monkeypatch):
+    commands = []
+
+    def fake_run(command, cwd, check):
+        commands.append(command)
+
+    monkeypatch.setattr(build_windows_exe.subprocess, "run", fake_run)
+
+    build_windows_exe._run_pyinstaller()
+
+    command = commands[0]
+    assert command.count("--hidden-import") >= 3
+    assert "sqlite_vec" in command
+    assert "pypdf" in command
+    assert "docx" in command
 
 
 def teardown_module() -> None:
