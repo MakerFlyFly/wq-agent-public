@@ -20,6 +20,7 @@
         <nav class="nav">
           <button class="nav-btn active" data-tab="run">运行</button>
           <button class="nav-btn" data-tab="config">配置</button>
+          <button class="nav-btn" data-tab="wiki">知识库</button>
           <button class="nav-btn" data-tab="results">结果</button>
           <button class="nav-btn" data-tab="logs">日志</button>
         </nav>
@@ -181,6 +182,41 @@
             </div>
             <div id="configForm" class="config-form"></div>
           </section>
+        </section>
+
+        <section class="tab-panel" id="tab-wiki">
+          <div class="wiki-layout">
+            <section class="panel wiki-browser">
+              <div class="panel-head">
+                <div>
+                  <h3>本地知识库</h3>
+                  <p id="wikiSummary" class="muted">正在读取...</p>
+                </div>
+                <button class="secondary" id="btnRefreshWiki">刷新</button>
+              </div>
+              <div class="wiki-root-list" id="wikiRoots"></div>
+            </section>
+
+            <section class="panel wiki-detail">
+              <div class="panel-head">
+                <div>
+                  <h3 id="wikiFileTitle">选择文件</h3>
+                  <p id="wikiFileMeta" class="muted">暂无预览</p>
+                </div>
+              </div>
+              <div class="upload-zone" id="wikiUploadZone">
+                <input
+                  id="wikiUploadInput"
+                  type="file"
+                  multiple
+                  accept=".md,.txt,.pdf,.docx"
+                />
+                <strong>拖拽上传到私有知识库</strong>
+                <span id="wikiUploadStatus">Markdown / TXT / PDF / DOCX</span>
+              </div>
+              <pre id="wikiPreview" class="wiki-preview">等待选择 Markdown 文件...</pre>
+            </section>
+          </div>
         </section>
 
         <section class="tab-panel" id="tab-results">
