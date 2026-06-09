@@ -25,7 +25,7 @@ from wq_agent.gui.server import (
     _redact,
     STATIC_DIR,
 )
-from wq_agent.llm.factory import GLOBAL_MODEL_OPTIONS
+from wq_agent.llm.factory import LLM_PROVIDER_OPTIONS
 from http.server import ThreadingHTTPServer
 
 
@@ -181,12 +181,12 @@ def test_env_save_deduplicates_keys_and_quotes_special_values(tmp_path):
     assert "OPENAI_BASE_URL=https://proxy.example/v1" in text
 
 
-def test_env_save_rejects_invalid_select_number_and_provider_model(tmp_path):
+def test_env_save_rejects_invalid_select_number_and_accepts_custom_model(tmp_path):
     (tmp_path / ".env").write_text("LLM_PROVIDER=deepseek\nLLM_MODEL=\n", encoding="utf-8")
     manager = EnvManager(tmp_path)
 
-    with pytest.raises(ValueError, match="OPENAI_WIRE_API"):
-        manager.save({"OPENAI_WIRE_API": "bogus"})
+    with pytest.raises(ValueError, match="LLM_WIRE_API"):
+        manager.save({"LLM_WIRE_API": "bogus"})
 
     with pytest.raises(ValueError, match="LLM_MAX_TOKENS"):
         manager.save({"LLM_MAX_TOKENS": "0"})
@@ -197,27 +197,18 @@ def test_env_save_rejects_invalid_select_number_and_provider_model(tmp_path):
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         manager.save({"OPENAI_API_KEY": "placeholder"})
 
-    with pytest.raises(ValueError, match="LLM_MODEL"):
-        manager.save({"LLM_MODEL": "gpt-5.4"})
-
-    manager.save({"LLM_MODEL": "deepseek-reasoner"})
-    assert "LLM_MODEL=deepseek-reasoner" in (tmp_path / ".env").read_text(encoding="utf-8")
+    manager.save({"LLM_MODEL": "private-proxy-model"})
+    assert "LLM_MODEL=private-proxy-model" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
 def test_config_model_options_stay_in_sync_with_factory_and_frontend():
     field_map = {field.key: field for field in CONFIG_FIELDS}
-    expected_global = {""}
-    for models in GLOBAL_MODEL_OPTIONS.values():
-        expected_global.update(models)
 
-    assert set(field_map["LLM_MODEL"].options) == expected_global
-    assert set(field_map["LLM_PROVIDER"].options) == set(GLOBAL_MODEL_OPTIONS)
+    assert set(field_map["LLM_PROVIDER"].options) == set(LLM_PROVIDER_OPTIONS)
+    assert field_map["LLM_MODEL"].kind == "text"
 
     app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    for provider, models in GLOBAL_MODEL_OPTIONS.items():
-        assert provider in app_js
-        for model in models:
-            assert model in app_js
+    assert "GLOBAL_MODEL_OPTIONS" not in app_js
 
 
 def test_build_cli_command_for_generate_and_backtest():

@@ -23,7 +23,7 @@ from dotenv import dotenv_values
 
 from ..config import Settings
 from ..db import Database
-from ..llm.factory import GLOBAL_MODEL_OPTIONS
+from ..llm.factory import LLM_PROVIDER_OPTIONS
 from ..llm.security import is_real_secret
 
 
@@ -34,6 +34,7 @@ MAX_JOB_LOG_LINES = 500
 CANCEL_TIMEOUT_SECONDS = 3
 STATIC_DIR = Path(__file__).with_name("static")
 SECRET_KEYS = {
+    "LLM_API_KEY",
     "OPENAI_API_KEY",
     "WQ_PASSWORD",
     "KIMI_API_KEY",
@@ -64,72 +65,63 @@ class ConfigField:
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
-    ConfigField("LLM_PROVIDER", "模型供应商", "模型", kind="select", options=("openai", "kimi", "deepseek")),
     ConfigField(
-        "LLM_MODEL",
-        "当前使用模型",
+        "LLM_PROVIDER",
+        "LLM Provider",
         "模型",
         kind="select",
-        options=(
-            "",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.3-codex",
-            "kimi-k2.6",
-            "deepseek-chat",
-            "deepseek-reasoner",
-        ),
+        options=tuple(LLM_PROVIDER_OPTIONS),
     ),
+    ConfigField("LLM_BASE_URL", "LLM API 地址", "模型"),
+    ConfigField("LLM_API_KEY", "LLM API 密钥", "模型", secret=True, kind="password"),
+    ConfigField("LLM_MODEL", "LLM 模型", "模型"),
     ConfigField("LLM_MAX_TOKENS", "最大输出 Token", "模型", kind="number"),
-    ConfigField("OPENAI_BASE_URL", "OpenAI API 地址", "模型"),
-    ConfigField("OPENAI_API_KEY", "OpenAI API 密钥", "模型", secret=True, kind="password"),
+    ConfigField("LLM_WIRE_API", "Wire API", "模型", kind="select", options=("auto", "responses", "chat_completions")),
     ConfigField(
-        "OPENAI_MODEL",
-        "OpenAI 默认模型",
-        "模型",
-        kind="select",
-        options=("", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"),
-        allow_custom=True,
-    ),
-    ConfigField("OPENAI_WIRE_API", "回复模式", "模型", kind="select", options=("auto", "responses", "chat_completions")),
-    ConfigField(
-        "OPENAI_REASONING_EFFORT",
+        "LLM_REASONING_EFFORT",
         "Reasoning Effort",
         "模型",
         kind="select",
         options=("", "none", "minimal", "low", "medium", "high", "xhigh"),
     ),
-    ConfigField("OPENAI_STORE", "响应存储", "模型", kind="boolean"),
-    ConfigField("OPENAI_ALLOW_INSECURE_HTTP", "允许远程 HTTP", "模型", kind="boolean"),
+    ConfigField("LLM_STORE", "响应存储", "模型", kind="boolean"),
+    ConfigField("LLM_ALLOW_INSECURE_HTTP", "允许远程 HTTP", "模型", kind="boolean"),
     ConfigField(
-        "OPENAI_CHAT_TOKEN_PARAM",
+        "LLM_CHAT_TOKEN_PARAM",
         "Chat Token 参数",
         "模型",
         kind="select",
         options=("max_tokens", "max_completion_tokens"),
     ),
-    ConfigField("OPENAI_CHAT_REASONING_EFFORT", "Chat Reasoning 参数", "模型", kind="boolean"),
-    ConfigField("KIMI_API_KEY", "Kimi API 密钥", "模型", secret=True, kind="password"),
-    ConfigField("KIMI_BASE_URL", "Kimi API 地址", "模型"),
+    ConfigField("LLM_CHAT_REASONING_EFFORT", "Chat Reasoning 参数", "模型", kind="boolean"),
+    ConfigField("ANTHROPIC_VERSION", "Anthropic Version", "模型"),
+    ConfigField("OPENAI_BASE_URL", "Legacy OpenAI API 地址", "兼容旧配置"),
+    ConfigField("OPENAI_API_KEY", "Legacy OpenAI API 密钥", "兼容旧配置", secret=True, kind="password"),
+    ConfigField("OPENAI_MODEL", "Legacy OpenAI 模型", "兼容旧配置"),
+    ConfigField("OPENAI_WIRE_API", "Legacy OpenAI Wire API", "兼容旧配置", kind="select", options=("auto", "responses", "chat_completions")),
     ConfigField(
-        "KIMI_MODEL",
-        "Kimi 默认模型",
-        "模型",
+        "OPENAI_REASONING_EFFORT",
+        "Legacy OpenAI Reasoning",
+        "兼容旧配置",
         kind="select",
-        options=("", "kimi-k2.6"),
-        allow_custom=True,
+        options=("", "none", "minimal", "low", "medium", "high", "xhigh"),
     ),
-    ConfigField("DEEPSEEK_API_KEY", "DeepSeek API 密钥", "模型", secret=True, kind="password"),
-    ConfigField("DEEPSEEK_BASE_URL", "DeepSeek API 地址", "模型"),
+    ConfigField("OPENAI_STORE", "Legacy OpenAI Store", "兼容旧配置", kind="boolean"),
+    ConfigField("OPENAI_ALLOW_INSECURE_HTTP", "Legacy OpenAI HTTP", "兼容旧配置", kind="boolean"),
     ConfigField(
-        "DEEPSEEK_MODEL",
-        "DeepSeek 默认模型",
-        "模型",
+        "OPENAI_CHAT_TOKEN_PARAM",
+        "Legacy OpenAI Chat Token",
+        "兼容旧配置",
         kind="select",
-        options=("", "deepseek-chat", "deepseek-reasoner"),
-        allow_custom=True,
+        options=("max_tokens", "max_completion_tokens"),
     ),
+    ConfigField("OPENAI_CHAT_REASONING_EFFORT", "Legacy OpenAI Chat Reasoning", "兼容旧配置", kind="boolean"),
+    ConfigField("KIMI_API_KEY", "Legacy Kimi API 密钥", "兼容旧配置", secret=True, kind="password"),
+    ConfigField("KIMI_BASE_URL", "Legacy Kimi API 地址", "兼容旧配置"),
+    ConfigField("KIMI_MODEL", "Legacy Kimi 模型", "兼容旧配置"),
+    ConfigField("DEEPSEEK_API_KEY", "Legacy DeepSeek API 密钥", "兼容旧配置", secret=True, kind="password"),
+    ConfigField("DEEPSEEK_BASE_URL", "Legacy DeepSeek API 地址", "兼容旧配置"),
+    ConfigField("DEEPSEEK_MODEL", "Legacy DeepSeek 模型", "兼容旧配置"),
     ConfigField("WQ_USERNAME", "WQ 用户名", "WorldQuant"),
     ConfigField("WQ_PASSWORD", "WQ 密码", "WorldQuant", secret=True, kind="password"),
     ConfigField("WQ_REGION", "Region", "WorldQuant"),
@@ -736,18 +728,7 @@ def _validate_config_value(field_def: ConfigField, text: str) -> str:
 
 
 def _validate_config_updates(current_values: dict[str, str], updates: dict[str, str]) -> None:
-    values = {**current_values, **updates}
-    provider = (values.get("LLM_PROVIDER") or _settings_default("LLM_PROVIDER")).strip().lower()
-    model = (values.get("LLM_MODEL") or "").strip()
-    if not model:
-        return
-    allowed = GLOBAL_MODEL_OPTIONS.get(provider)
-    if allowed and model not in allowed:
-        raise ValueError(
-            f"LLM_MODEL={model!r} is not valid for LLM_PROVIDER={provider!r}. "
-            f"Use one of: {', '.join(allowed)}; or leave LLM_MODEL blank and set "
-            f"{provider.upper()}_MODEL instead."
-        )
+    return
 
 
 def _clean_env_key(key: str) -> str:
