@@ -5,12 +5,6 @@ const state = {
   csrfToken: "",
 };
 const CLEAR_SECRET_VALUE = "__clear_secret__";
-const GLOBAL_MODEL_OPTIONS = {
-  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
-  kimi: ["kimi-k2.6"],
-  deepseek: ["deepseek-chat", "deepseek-reasoner"],
-};
-
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -246,21 +240,18 @@ async function saveConfig() {
 
 function renderConfigStatus(fields) {
   const byKey = Object.fromEntries(fields.map((field) => [field.key, field]));
-  const provider = String(byKey.LLM_PROVIDER?.value || "openai").toLowerCase();
-  const providerKey = {
-    openai: "OPENAI_API_KEY",
-    kimi: "KIMI_API_KEY",
-    deepseek: "DEEPSEEK_API_KEY",
-  }[provider] || "OPENAI_API_KEY";
-  const globalModel = byKey.LLM_MODEL?.value || "";
-  const globalModelValid = !globalModel || (GLOBAL_MODEL_OPTIONS[provider] || []).includes(globalModel);
-  const model = globalModel
-    ? (globalModelValid ? globalModel : "")
-    : byKey[`${provider.toUpperCase()}_MODEL`]?.value || byKey.OPENAI_MODEL?.value;
+  const provider = String(byKey.LLM_PROVIDER?.value || "openai_compatible").toLowerCase();
+  const model = byKey.LLM_MODEL?.value || byKey.OPENAI_MODEL?.value || "";
+  const apiKeyConfigured = Boolean(
+    byKey.LLM_API_KEY?.has_value ||
+    byKey.OPENAI_API_KEY?.has_value ||
+    byKey.KIMI_API_KEY?.has_value ||
+    byKey.DEEPSEEK_API_KEY?.has_value
+  );
   const checks = [
     ["模型供应商", Boolean(provider)],
-    ["模型密钥", Boolean(byKey[providerKey]?.has_value)],
-    ["当前模型", globalModelValid && Boolean(model)],
+    ["模型密钥", apiKeyConfigured],
+    ["当前模型", Boolean(model)],
     ["WQ 账号", Boolean(byKey.WQ_USERNAME?.value && byKey.WQ_PASSWORD?.has_value)],
     ["正式提交", false],
   ];
