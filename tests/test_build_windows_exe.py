@@ -42,7 +42,7 @@ def _create_required_distribution(app_dist: Path) -> None:
 def test_clean_previous_build_refuses_to_delete_runtime_private_files(tmp_path, monkeypatch):
     app_dist = _patch_paths(monkeypatch, tmp_path)
     app_dist.mkdir(parents=True)
-    (app_dist / ".env").write_text("OPENAI_API_KEY=secret", encoding="utf-8")
+    (app_dist / ".env").write_text("LLM_API_KEY=secret", encoding="utf-8")
 
     with pytest.raises(SystemExit, match="Refusing to delete"):
         build_windows_exe._clean_previous_build()
