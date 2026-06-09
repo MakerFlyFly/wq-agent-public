@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import shutil
 import subprocess
@@ -27,6 +28,12 @@ from wq_agent.gui.server import (
     _redact,
     STATIC_DIR,
 )
+from wq_agent.gui.wiki_files import (
+    UploadedFile,
+    build_wiki_tree,
+    import_uploaded_files,
+    read_wiki_file,
+)
 from wq_agent.llm.factory import PROTOCOL_PROVIDER_OPTIONS
 from http.server import ThreadingHTTPServer
 
@@ -48,6 +55,39 @@ def _stop_test_server(server, thread):
 
 def _open(request):
     return urllib.request.urlopen(request, timeout=5)
+
+
+def _multipart_body(
+    fields: dict[str, str],
+    files: list[tuple[str, str, bytes, str]],
+    *,
+    boundary: str = "----WQAgentTestBoundary",
+) -> tuple[bytes, str]:
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    for name, filename, content, content_type in files:
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("utf-8"),
+                (
+                    f'Content-Disposition: form-data; name="{name}"; '
+                    f'filename="{filename}"\r\n'
+                ).encode("utf-8"),
+                f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+                content,
+                b"\r\n",
+            ]
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
 def test_env_snapshot_initializes_from_example_and_masks_secret(tmp_path):
@@ -390,6 +430,171 @@ def test_static_assets_exist():
     assert (STATIC_DIR / "app.js").exists()
 
 
+def test_wiki_file_import_builds_private_upload_markdown_and_tree(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "wiki" / "concepts").mkdir(parents=True)
+    (tmp_path / "wiki" / "concepts" / "momentum.md").write_text(
+        "# Momentum\n\npublic note",
+        encoding="utf-8",
+    )
+
+    result = import_uploaded_files(
+        tmp_path,
+        [UploadedFile(filename="../alpha idea.txt", content="低换手 alpha".encode("utf-8"))],
+    )
+
+    uploaded = result["uploaded"][0]
+    assert uploaded["path"].startswith("uploads/")
+    assert uploaded["path"].endswith("-alpha-idea.md")
+    assert result["tree"]["roots"]["public"]["file_count"] == 1
+    assert result["tree"]["roots"]["private"]["file_count"] == 1
+
+    saved = tmp_path / "private_wiki" / uploaded["path"]
+    text = saved.read_text(encoding="utf-8")
+    assert "original_filename: alpha idea.txt" in text
+    assert "# alpha idea" in text
+    assert "低换手 alpha" in text
+
+    payload = read_wiki_file(tmp_path, "private", uploaded["path"])
+    assert payload["name"] == saved.name
+    assert "低换手 alpha" in payload["content"]
+
+
+def test_wiki_file_import_rejects_unsupported_and_unsafe_paths(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "wiki").mkdir()
+    (tmp_path / "wiki" / "note.md").write_text("# Note", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not supported"):
+        import_uploaded_files(
+            tmp_path,
+            [UploadedFile(filename="data.csv", content=b"a,b\n1,2")],
+        )
+
+    with pytest.raises(ValueError, match="Invalid wiki path"):
+        read_wiki_file(tmp_path, "public", "../.env")
+
+    with pytest.raises(ValueError, match="Only Markdown"):
+        read_wiki_file(tmp_path, "public", "note.txt")
+
+
+def test_wiki_multi_file_import_is_atomic_on_failure(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not supported"):
+        import_uploaded_files(
+            tmp_path,
+            [
+                UploadedFile(filename="valid.txt", content=b"valid alpha note"),
+                UploadedFile(filename="bad.csv", content=b"a,b\n1,2"),
+            ],
+        )
+
+    upload_dir = tmp_path / "private_wiki" / "uploads"
+    assert not upload_dir.exists() or list(upload_dir.glob("*.md")) == []
+
+
+def test_wiki_multi_file_import_rolls_back_when_commit_fails(tmp_path, monkeypatch):
+    import wq_agent.gui.wiki_files as wiki_files
+
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+
+    real_commit = wiki_files._commit_staged_upload
+    calls = 0
+
+    def fail_second_commit(staging_path, output_path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated commit failure")
+        real_commit(staging_path, output_path)
+
+    monkeypatch.setattr(wiki_files, "_commit_staged_upload", fail_second_commit)
+
+    with pytest.raises(OSError, match="simulated commit failure"):
+        import_uploaded_files(
+            tmp_path,
+            [
+                UploadedFile(filename="first.txt", content=b"first alpha note"),
+                UploadedFile(filename="second.txt", content=b"second alpha note"),
+            ],
+        )
+
+    upload_dir = tmp_path / "private_wiki" / "uploads"
+    assert upload_dir.exists()
+    assert list(upload_dir.glob("*.md")) == []
+    assert list(upload_dir.glob(".staging-*")) == []
+
+
+def test_wiki_docx_import_extracts_text_and_enforces_text_limit(tmp_path, monkeypatch):
+    from docx import Document
+
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    doc = Document()
+    doc.add_paragraph("short alpha memo")
+    buffer = io.BytesIO()
+    doc.save(buffer)
+
+    result = import_uploaded_files(
+        tmp_path,
+        [UploadedFile(filename="memo.docx", content=buffer.getvalue())],
+    )
+    uploaded = result["uploaded"][0]
+    saved = tmp_path / "private_wiki" / uploaded["path"]
+
+    assert uploaded["source_type"] == "docx"
+    assert "short alpha memo" in saved.read_text(encoding="utf-8")
+
+    monkeypatch.setattr("wq_agent.gui.wiki_files.MAX_EXTRACTED_CHARS", 4)
+    with pytest.raises(ValueError, match="extracted text exceeds"):
+        import_uploaded_files(
+            tmp_path,
+            [UploadedFile(filename="too-long.docx", content=buffer.getvalue())],
+        )
+
+
+def test_wiki_roots_must_stay_under_workspace(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-wiki"
+    (tmp_path / ".env").write_text(
+        f"WIKI_DIR={outside}\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="under the workspace"):
+        build_wiki_tree(tmp_path)
+
+
+def test_wiki_tree_reports_public_and_private_roots(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "wiki" / "operators").mkdir(parents=True)
+    (tmp_path / "wiki" / "operators" / "rank.md").write_text("# Rank", encoding="utf-8")
+
+    tree = build_wiki_tree(tmp_path)
+
+    assert tree["roots"]["public"]["label"] == "公开知识库"
+    assert tree["roots"]["public"]["file_count"] == 1
+    assert tree["roots"]["private"]["label"] == "私有知识库"
+    assert tree["roots"]["private"]["exists"] is False
+
+
 def test_job_manager_runs_cli_help_to_completion(tmp_path):
     manager = JobManager(tmp_path, EnvManager(tmp_path))
     job = manager.start("help", ["--help"])
@@ -510,6 +715,94 @@ def test_http_get_api_requires_csrf_after_meta_and_sends_security_headers(tmp_pa
         )
         with _open(request) as response:
             assert response.status == 200
+    finally:
+        _stop_test_server(server, thread)
+
+
+def test_http_wiki_upload_accepts_multipart_with_csrf_and_updates_tree(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "wiki").mkdir()
+    (tmp_path / "wiki" / "index.md").write_text("# Wiki", encoding="utf-8")
+    state, server, thread = _start_test_server(tmp_path)
+    try:
+        body, content_type = _multipart_body(
+            {"root": "private"},
+            [
+                (
+                    "files",
+                    "research-note.md",
+                    "# Research\n\nalpha memo".encode("utf-8"),
+                    "text/markdown",
+                )
+            ],
+        )
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{state.port}/api/wiki/upload",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": content_type,
+                "X-WQ-Agent-CSRF": state.csrf_token,
+                "Origin": f"http://127.0.0.1:{state.port}",
+            },
+        )
+
+        with _open(request) as response:
+            assert response.status == 200
+            payload = json.loads(response.read().decode("utf-8"))
+
+        uploaded = payload["uploaded"][0]
+        assert uploaded["original_name"] == "research-note.md"
+        assert uploaded["path"].startswith("uploads/")
+        assert payload["tree"]["roots"]["private"]["file_count"] == 1
+        assert (tmp_path / "private_wiki" / uploaded["path"]).exists()
+    finally:
+        _stop_test_server(server, thread)
+
+
+def test_http_wiki_upload_rejects_public_root_and_malformed_multipart(tmp_path):
+    (tmp_path / ".env").write_text(
+        "WIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "wiki").mkdir()
+    state, server, thread = _start_test_server(tmp_path)
+    try:
+        body, content_type = _multipart_body(
+            {"root": "public"},
+            [("files", "secret.md", b"# Secret", "text/markdown")],
+        )
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{state.port}/api/wiki/upload",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": content_type,
+                "X-WQ-Agent-CSRF": state.csrf_token,
+                "Origin": f"http://127.0.0.1:{state.port}",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as public_error:
+            _open(request)
+        assert public_error.value.code == 400
+        assert not (tmp_path / "wiki" / "uploads").exists()
+
+        malformed = urllib.request.Request(
+            f"http://127.0.0.1:{state.port}/api/wiki/upload",
+            data=b"not a multipart body",
+            method="POST",
+            headers={
+                "Content-Type": "multipart/form-data",
+                "X-WQ-Agent-CSRF": state.csrf_token,
+                "Origin": f"http://127.0.0.1:{state.port}",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as multipart_error:
+            _open(malformed)
+        assert multipart_error.value.code == 400
     finally:
         _stop_test_server(server, thread)
 
