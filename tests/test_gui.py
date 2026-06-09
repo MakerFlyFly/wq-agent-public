@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -24,6 +25,7 @@ from wq_agent.gui.server import (
     JobManager,
     SAFE_ACTIONS,
     build_cli_command,
+    build_subprocess_command,
     _make_handler,
     _redact,
     STATIC_DIR,
@@ -609,6 +611,25 @@ def test_job_manager_runs_cli_help_to_completion(tmp_path):
     assert snapshot["status"] == "completed"
     assert snapshot["returncode"] == 0
     assert any("Usage:" in line for line in snapshot["output"])
+
+
+def test_job_manager_builds_subprocess_command_for_runtime_modes(monkeypatch):
+    monkeypatch.setattr(sys, "executable", r"C:\dist\wq-agent\wq-agent.exe")
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert build_subprocess_command(["status"]) == [
+        r"C:\dist\wq-agent\wq-agent.exe",
+        "-m",
+        "wq_agent.cli",
+        "status",
+    ]
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert build_subprocess_command(["gui", "--no-open-browser"]) == [
+        r"C:\dist\wq-agent\wq-agent.exe",
+        "gui",
+        "--no-open-browser",
+    ]
 
 
 def test_job_snapshot_limits_log_lines():
