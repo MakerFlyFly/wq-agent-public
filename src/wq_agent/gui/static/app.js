@@ -7,6 +7,12 @@ const state = {
   wikiUploading: false,
 };
 const CLEAR_SECRET_VALUE = "__clear_secret__";
+const SECRET_AUTOCOMPLETE = {
+  LLM_API_KEY: "off",
+  EMBEDDING_API_KEY: "off",
+  WQ_PASSWORD: "new-password",
+};
+
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -125,25 +131,45 @@ async function loadConfig() {
 }
 
 function renderConfig(fields) {
-  const groups = new Map();
-  fields.forEach((field) => {
-    if (!groups.has(field.section)) {
-      groups.set(field.section, []);
+  const modelFields = fields.filter((field) => field.section === "模型");
+  const nonModelFields = fields.filter((field) => field.section !== "模型");
+  const groups = [
+    {
+      key: "model",
+      title: "通用模型参数",
+      meta: "LLM_PROVIDER / LLM_BASE_URL / LLM_MODEL",
+      fields: modelFields,
+    },
+  ];
+  nonModelFields.forEach((field) => {
+    let group = groups.find((item) => item.key === field.section);
+    if (!group) {
+      group = { key: field.section, title: field.section, meta: "", fields: [] };
+      groups.push(group);
     }
-    groups.get(field.section).push(field);
+    group.fields.push(field);
   });
 
-  $("configForm").innerHTML = "";
-  for (const [section, items] of groups) {
-    const sectionEl = document.createElement("section");
-    sectionEl.className = "config-section";
-    sectionEl.innerHTML = `<h4>${escapeHtml(section)}</h4>`;
-    const fieldsEl = document.createElement("div");
-    fieldsEl.className = "config-fields";
-    items.forEach((field) => fieldsEl.appendChild(configField(field)));
-    sectionEl.appendChild(fieldsEl);
-    $("configForm").appendChild(sectionEl);
-  }
+  const form = $("configForm");
+  form.innerHTML = "";
+  groups
+    .filter((group) => group.fields.length)
+    .forEach((group) => {
+      const sectionEl = document.createElement("section");
+      sectionEl.className = `config-section config-section-${cssToken(group.key)}`;
+      const headEl = document.createElement("div");
+      headEl.className = "config-section-head";
+      headEl.innerHTML = `
+        <h4>${escapeHtml(group.title)}</h4>
+        ${group.meta ? `<span>${escapeHtml(group.meta)}</span>` : ""}
+      `;
+      const fieldsEl = document.createElement("div");
+      fieldsEl.className = "config-fields";
+      group.fields.forEach((field) => fieldsEl.appendChild(configField(field)));
+      sectionEl.appendChild(headEl);
+      sectionEl.appendChild(fieldsEl);
+      form.appendChild(sectionEl);
+    });
 }
 
 function configField(field) {
@@ -178,9 +204,28 @@ function configField(field) {
   if (field.secret) {
     const wrap = document.createElement("div");
     wrap.className = "secret-wrap";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = field.has_value ? "修改" : "设置";
+    edit.addEventListener("click", () => {
+      const editing = input.dataset.secretEditing === "true";
+      input.dataset.secretEditing = editing ? "false" : "true";
+      input.disabled = editing;
+      input.type = "password";
+      input.value = "";
+      input.placeholder = secretPlaceholder(field, !editing);
+      reveal.disabled = editing;
+      reveal.textContent = "显示";
+      edit.textContent = editing ? (field.has_value ? "修改" : "设置") : "取消";
+      refreshConfigStatusFromForm();
+      if (!editing) {
+        input.focus();
+      }
+    });
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.textContent = "显示";
+    reveal.disabled = true;
     reveal.addEventListener("click", () => {
       input.type = input.type === "password" ? "text" : "password";
       reveal.textContent = input.type === "password" ? "显示" : "隐藏";
@@ -192,13 +237,20 @@ function configField(field) {
     clear.addEventListener("click", () => {
       const active = input.dataset.clearSecret !== "true";
       input.dataset.clearSecret = active ? "true" : "false";
-      input.disabled = active;
-      reveal.disabled = active;
+      input.disabled = true;
+      reveal.disabled = true;
+      edit.disabled = active;
+      input.dataset.secretEditing = "false";
+      input.type = "password";
+      input.value = "";
+      input.placeholder = secretPlaceholder(field, false);
+      reveal.textContent = "显示";
       clear.textContent = active ? "保留" : "清除";
       clear.classList.toggle("danger-inline", active);
       refreshConfigStatusFromForm();
     });
     wrap.appendChild(input);
+    wrap.appendChild(edit);
     wrap.appendChild(reveal);
     wrap.appendChild(clear);
     label.appendChild(wrap);
@@ -232,8 +284,17 @@ function createConfigInput(field) {
 
   const input = document.createElement("input");
   input.value = field.secret ? "" : field.value || "";
-  input.placeholder = field.secret && field.has_value ? "已设置，留空保持不变" : "";
+  input.placeholder = field.secret ? secretPlaceholder(field, false) : "";
   input.type = field.secret ? "password" : field.kind === "number" ? "number" : "text";
+  input.id = `config-${cssToken(field.key)}`;
+  input.name = `wq-agent-${cssToken(field.key)}`;
+  input.autocomplete = autocompleteForField(field);
+  if (field.secret) {
+    input.disabled = true;
+    input.dataset.secret = "true";
+    input.dataset.secretEditing = "false";
+    input.dataset.clearSecret = "false";
+  }
   let datalist = null;
   if (field.kind === "select" && field.allow_custom) {
     const listId = `options-${field.key}`;
@@ -253,28 +314,29 @@ function createConfigInput(field) {
   return { input, datalist };
 }
 
-function handleConfigInputChange(event) {
-  if (event.target.dataset.configKey === "LLM_PROVIDER") {
-    state.configFields = currentConfigFieldsFromForm();
-    renderConfig(state.configFields);
-    renderConfigStatus(state.configFields);
-    return;
+function secretPlaceholder(field, editing) {
+  if (editing) {
+    return "输入新值后保存";
   }
+  return field.has_value ? "已设置，点击修改后输入新值" : "未设置，点击设置后输入";
+}
+
+function autocompleteForField(field) {
+  if (field.key === "WQ_USERNAME") {
+    return "username";
+  }
+  if (field.secret) {
+    return SECRET_AUTOCOMPLETE[field.key] || "new-password";
+  }
+  return "off";
+}
+
+function handleConfigInputChange() {
   refreshConfigStatusFromForm();
 }
 
 async function saveConfig() {
-  const values = {};
-  document.querySelectorAll("[data-config-key]").forEach((input) => {
-    const key = input.dataset.configKey;
-    if (input.dataset.clearSecret === "true") {
-      values[key] = CLEAR_SECRET_VALUE;
-    } else if (input.type === "checkbox") {
-      values[key] = input.checked;
-    } else {
-      values[key] = input.value;
-    }
-  });
+  const values = collectConfigValues();
 
   try {
     const data = await api("/api/config", {
@@ -288,6 +350,30 @@ async function saveConfig() {
   } catch (error) {
     toast(error.message);
   }
+}
+
+function collectConfigValues() {
+  const values = {};
+  document.querySelectorAll("[data-config-key]").forEach((input) => {
+    const key = input.dataset.configKey;
+    const isSecret = input.dataset.secret === "true";
+    if (input.dataset.clearSecret === "true") {
+      values[key] = CLEAR_SECRET_VALUE;
+    } else if (isSecret && input.dataset.secretEditing !== "true") {
+      return;
+    } else if (isSecret && !input.value) {
+      return;
+    } else if (input.type === "checkbox") {
+      values[key] = input.checked;
+    } else {
+      values[key] = input.value;
+    }
+  });
+  return values;
+}
+
+function cssToken(value) {
+  return String(value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "group";
 }
 
 function renderConfigStatus(fields) {
@@ -327,11 +413,10 @@ function currentConfigFieldsFromForm() {
       if (input.dataset.clearSecret === "true") {
         next.has_value = false;
         next.value = "";
-      } else {
+      } else if (input.dataset.secretEditing === "true") {
         next.has_value = Boolean(input.value) || Boolean(field.has_value);
-        if (input.value) {
-          next.value = input.value;
-        }
+      } else {
+        next.has_value = Boolean(field.has_value);
       }
     } else if (input.type === "checkbox") {
       next.value = String(input.checked);

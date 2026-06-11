@@ -1,8 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import http.client
 import io
 import json
+import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -29,7 +31,9 @@ from wq_agent.gui.server import (
     _make_handler,
     _redact,
     STATIC_DIR,
+    serve_gui,
 )
+from wq_agent.workspace import WORKSPACE_ENV_VAR
 from wq_agent.gui.wiki_files import (
     UploadedFile,
     build_wiki_tree,
@@ -208,6 +212,100 @@ def test_env_save_can_clear_secret_explicitly(tmp_path):
     assert values["LLM_API_KEY"]["has_value"] is False
 
 
+def test_env_save_updates_wq_password_without_touching_api_keys(tmp_path):
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "LLM_API_KEY=llm-secret",
+                "UNRELATED_API_KEY=external-secret",
+                "WQ_PASSWORD=old-wq-secret",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    EnvManager(tmp_path).save({"WQ_PASSWORD": "new-wq-secret"})
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+
+    assert "WQ_PASSWORD=new-wq-secret" in text
+    assert "LLM_API_KEY=llm-secret" in text
+    assert "UNRELATED_API_KEY=external-secret" in text
+
+
+def test_env_save_updates_protocol_api_key_without_touching_wq_password(tmp_path):
+    (tmp_path / ".env").write_text(
+        "LLM_API_KEY=old-llm-secret\nWQ_PASSWORD=wq-secret\n",
+        encoding="utf-8",
+    )
+
+    EnvManager(tmp_path).save({"LLM_API_KEY": "new-llm-secret"})
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+
+    assert "LLM_API_KEY=new-llm-secret" in text
+    assert "WQ_PASSWORD=wq-secret" in text
+
+
+def test_env_save_rejects_matching_wq_password_and_api_key_updates(tmp_path):
+    (tmp_path / ".env").write_text(
+        "LLM_API_KEY=old-llm-secret\nWQ_PASSWORD=old-wq-secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="自动填充污染"):
+        EnvManager(tmp_path).save(
+            {
+                "LLM_API_KEY": "same-secret-value",
+                "WQ_PASSWORD": "same-secret-value",
+            }
+        )
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LLM_API_KEY=old-llm-secret" in text
+    assert "WQ_PASSWORD=old-wq-secret" in text
+
+
+def test_env_save_rejects_api_key_matching_current_wq_password(tmp_path):
+    (tmp_path / ".env").write_text(
+        "LLM_API_KEY=old-llm-secret\nWQ_PASSWORD=current-wq-secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="自动填充污染"):
+        EnvManager(tmp_path).save({"LLM_API_KEY": "current-wq-secret"})
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LLM_API_KEY=old-llm-secret" in text
+    assert "WQ_PASSWORD=current-wq-secret" in text
+
+
+def test_env_save_rejects_wq_password_matching_current_api_key(tmp_path):
+    (tmp_path / ".env").write_text(
+        "LLM_API_KEY=current-llm-secret\nWQ_PASSWORD=old-wq-secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="自动填充污染"):
+        EnvManager(tmp_path).save({"WQ_PASSWORD": "current-llm-secret"})
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LLM_API_KEY=current-llm-secret" in text
+    assert "WQ_PASSWORD=old-wq-secret" in text
+
+
+def test_env_save_clear_one_secret_only_affects_that_key(tmp_path):
+    (tmp_path / ".env").write_text(
+        "LLM_API_KEY=llm-secret\nWQ_PASSWORD=wq-secret\n",
+        encoding="utf-8",
+    )
+
+    EnvManager(tmp_path).save({"LLM_API_KEY": CLEAR_SECRET_VALUE})
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+
+    assert "LLM_API_KEY=" in text
+    assert "WQ_PASSWORD=wq-secret" in text
+
+
 def test_env_save_deduplicates_keys_and_quotes_special_values(tmp_path):
     (tmp_path / ".env").write_text(
         "LLM_MODEL=old\nLLM_MODEL=older\nLLM_BASE_URL=https://api.openai.com/v1\n",
@@ -325,6 +423,116 @@ assert.strictEqual(select.value, "openai_compatible");
 
     assert result.returncode == 0, result.stderr + result.stdout
 
+
+def test_frontend_secrets_require_explicit_editing_before_save():
+    app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'input.dataset.secret = "true"' in app_js
+    assert 'input.dataset.secretEditing = "false"' in app_js
+    assert 'input.disabled = true' in app_js
+    assert 'isSecret && input.dataset.secretEditing !== "true"' in app_js
+    assert "return;" in app_js
+    assert "autocompleteForField" in app_js
+    assert "wq-agent-${cssToken(field.key)}" in app_js
+
+
+def test_frontend_collect_config_values_secret_payload_behavior(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for frontend behavior coverage")
+
+    script = tmp_path / "config_payload_test.js"
+    script.write_text(
+        r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+let currentInputs = [];
+const context = {
+  document: {
+    addEventListener() {},
+    getElementById() { return null; },
+    querySelectorAll(selector) {
+      assert.strictEqual(selector, "[data-config-key]");
+      return currentInputs;
+    },
+  },
+  window: { setTimeout() {} },
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[2], "utf8"), context, { filename: "app.js" });
+
+function collect() {
+  return JSON.parse(JSON.stringify(context.collectConfigValues()));
+}
+
+function secret(key, options = {}) {
+  return {
+    dataset: {
+      configKey: key,
+      secret: "true",
+      secretEditing: options.editing || "false",
+      clearSecret: options.clear || "false",
+    },
+    type: "password",
+    value: options.value || "",
+  };
+}
+
+function plain(key, value) {
+  return { dataset: { configKey: key }, type: "text", value };
+}
+
+function checkbox(key, checked) {
+  return { dataset: { configKey: key }, type: "checkbox", checked };
+}
+
+currentInputs = [
+  secret("LLM_API_KEY", { value: "autofilled-wq-password" }),
+  secret("WQ_PASSWORD", { editing: "true", value: "new-wq-password" }),
+  plain("LLM_MODEL", "gpt-5.5"),
+];
+assert.deepStrictEqual(collect(), {
+  WQ_PASSWORD: "new-wq-password",
+  LLM_MODEL: "gpt-5.5",
+});
+
+currentInputs = [
+  secret("LLM_API_KEY", { editing: "true", value: "new-llm-key" }),
+  secret("WQ_PASSWORD", { value: "autofilled-wq-password" }),
+];
+assert.deepStrictEqual(collect(), {
+  LLM_API_KEY: "new-llm-key",
+});
+
+currentInputs = [
+  secret("LLM_API_KEY", { clear: "true", value: "should-not-send" }),
+  secret("WQ_PASSWORD", { value: "should-not-send" }),
+];
+assert.deepStrictEqual(collect(), {
+  LLM_API_KEY: "__clear_secret__",
+});
+
+currentInputs = [
+  secret("LLM_API_KEY", { editing: "true", value: "" }),
+  checkbox("LLM_STORE", true),
+];
+assert.deepStrictEqual(collect(), {
+  LLM_STORE: true,
+});
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [node, str(script), str(STATIC_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
 
 def test_build_cli_command_for_generate_and_backtest():
     generate = build_cli_command(
@@ -632,6 +840,45 @@ def test_job_manager_builds_subprocess_command_for_runtime_modes(monkeypatch):
     ]
 
 
+def test_job_manager_passes_workspace_env_to_child_process(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        stdout = ["done\n"]
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, *, cwd, env, stdout, stderr, text, encoding, errors):
+        captured.update(
+            {
+                "command": command,
+                "cwd": cwd,
+                "env": env,
+                "stdout": stdout,
+                "stderr": stderr,
+                "text": text,
+                "encoding": encoding,
+                "errors": errors,
+            }
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr("wq_agent.gui.server.subprocess.Popen", fake_popen)
+    manager = JobManager(tmp_path, EnvManager(tmp_path))
+    manager.start("status", ["status"])
+
+    deadline = time.time() + 5
+    snapshot = manager.snapshot()["job"]
+    while snapshot["status"] in {"pending", "running"} and time.time() < deadline:
+        time.sleep(0.01)
+        snapshot = manager.snapshot()["job"]
+
+    assert snapshot["status"] == "completed"
+    assert captured["cwd"] == tmp_path
+    assert captured["env"][WORKSPACE_ENV_VAR] == str(tmp_path)
+
+
 def test_job_snapshot_limits_log_lines():
     job = Job(id="job-1", action="generate", command=["python", "-m", "wq_agent.cli", "generate"])
     for i in range(MAX_JOB_LOG_LINES + 3):
@@ -738,6 +985,99 @@ def test_http_get_api_requires_csrf_after_meta_and_sends_security_headers(tmp_pa
             assert response.status == 200
     finally:
         _stop_test_server(server, thread)
+
+
+def test_http_config_and_wiki_use_workspace_root(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text(
+        "LLM_MODEL=gpt-workspace\nWIKI_DIR=./wiki\nWIKI_AUTO_RECORD_DIR=./private_wiki\n",
+        encoding="utf-8",
+    )
+    (workspace / "wiki").mkdir()
+    (workspace / "wiki" / "index.md").write_text("# Workspace Wiki", encoding="utf-8")
+    (workspace / "private_wiki").mkdir()
+    (workspace / "private_wiki" / "secret-alpha.md").write_text(
+        "# Private Alpha",
+        encoding="utf-8",
+    )
+    dist_root = workspace / "dist" / "wq-agent"
+    dist_root.mkdir(parents=True)
+    (dist_root / ".env").write_text("LLM_MODEL=gpt-dist\n", encoding="utf-8")
+
+    state, server, thread = _start_test_server(workspace)
+    try:
+        meta_request = urllib.request.Request(f"http://127.0.0.1:{state.port}/api/meta")
+        with _open(meta_request) as response:
+            token = json.loads(response.read().decode("utf-8"))["csrf_token"]
+
+        headers = {
+            "X-WQ-Agent-CSRF": token,
+            "Origin": f"http://127.0.0.1:{state.port}",
+        }
+        with _open(
+            urllib.request.Request(
+                f"http://127.0.0.1:{state.port}/api/config",
+                headers=headers,
+            )
+        ) as response:
+            config = json.loads(response.read().decode("utf-8"))
+        values = {field["key"]: field["value"] for field in config["fields"]}
+
+        with _open(
+            urllib.request.Request(
+                f"http://127.0.0.1:{state.port}/api/wiki/tree",
+                headers=headers,
+            )
+        ) as response:
+            tree = json.loads(response.read().decode("utf-8"))
+
+        assert config["env_path"] == str(workspace / ".env")
+        assert values["LLM_MODEL"] == "gpt-workspace"
+        assert tree["roots"]["private"]["path"] == str(workspace / "private_wiki")
+        assert tree["roots"]["private"]["file_count"] == 1
+        assert tree["roots"]["private"]["tree"]["children"][0]["name"] == "secret-alpha.md"
+    finally:
+        _stop_test_server(server, thread)
+
+
+def test_serve_gui_resolves_workspace_from_frozen_dist(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    exe_dir = workspace / "dist" / "wq-agent"
+    exe_dir.mkdir(parents=True)
+    exe_path = exe_dir / "wq-agent.exe"
+    exe_path.write_text("", encoding="utf-8")
+    states = []
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            self.address = address
+            self.handler = handler
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    def fake_make_handler(state):
+        states.append(state)
+        return object()
+
+    monkeypatch.delenv(WORKSPACE_ENV_VAR, raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_path))
+    monkeypatch.setattr("wq_agent.gui.server._make_handler", fake_make_handler)
+    monkeypatch.setattr("wq_agent.gui.server.ThreadingHTTPServer", FakeServer)
+    old_cwd = Path.cwd()
+
+    try:
+        serve_gui(open_browser=False)
+    finally:
+        os.chdir(old_cwd)
+
+    assert states[0].root == workspace.resolve()
+    assert states[0].env.env_path == workspace.resolve() / ".env"
 
 
 def test_http_wiki_upload_accepts_multipart_with_csrf_and_updates_tree(tmp_path):
@@ -871,3 +1211,4 @@ def test_static_assets_reject_path_traversal_and_send_security_headers(tmp_path)
             assert exc.code == 404
     finally:
         _stop_test_server(server, thread)
+
